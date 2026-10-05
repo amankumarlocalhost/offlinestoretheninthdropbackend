@@ -1,0 +1,29 @@
+{
+  "name": "tnd-store-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend for THE NINTH DROP offline store (POS) \u2014 Express + MongoDB. Reads products/categories from the online store's database.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "seed:admin": "node scripts/seedAdmin.js",
+    "seed:demo": "node scripts/seedDemo.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dayjs": "^1.11.23",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "jose": "^5.10.0",
+    "mongoose": "^8.24.4",
+    "multer": "^2.0.1",
+    "zod": "^3.25.76"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  }
+}
