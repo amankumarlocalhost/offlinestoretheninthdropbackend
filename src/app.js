@@ -1,3 +1,4 @@
+import "dotenv/config"; // must stay first: models read env vars when they load
 import express from "express";
 import cookieParser from "cookie-parser";
 import cors from "cors";
@@ -11,6 +12,7 @@ import salesRoutes from "./routes/sales.routes.js";
 import returnsRoutes from "./routes/returns.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
 import publicRoutes from "./routes/public.routes.js";
+import { connectDB } from "./lib/db.js";
 
 export function createApp() {
   const app = express();
@@ -32,6 +34,18 @@ export function createApp() {
   });
 
   const api = express.Router();
+  // On Vercel there is no startup step, so connect on first use (cached after that).
+  // /health reports DB problems itself.
+  api.use(async (req, res, next) => {
+    if (req.path === "/health") return next();
+    try {
+      await connectDB();
+      next();
+    } catch (err) {
+      console.error("[POS] Could not connect to MongoDB:", err.message);
+      res.status(503).json({ message: "Database unavailable.", code: "DB_UNAVAILABLE" });
+    }
+  });
   api.use("/", publicRoutes);
   api.use("/auth", authRoutes);
   api.use("/users", usersRoutes);
@@ -55,3 +69,6 @@ export function createApp() {
 
   return app;
 }
+
+// Vercel uses this default export as the serverless function; src/server.js is for local runs.
+export default createApp();
