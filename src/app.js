@@ -26,6 +26,11 @@ export function createApp() {
   app.use(express.json({ limit: "1mb" }));
   app.use(cookieParser());
 
+  // Plain status page so opening the deployment URL shows the API is up.
+  app.get("/", (_req, res) => {
+    res.json({ status: "ok", message: "THE NINTH DROP store API is running.", health: "/api/health" });
+  });
+
   const api = express.Router();
   api.use("/", publicRoutes);
   api.use("/auth", authRoutes);
