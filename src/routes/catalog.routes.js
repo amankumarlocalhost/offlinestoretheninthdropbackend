@@ -3,7 +3,7 @@
 import { Router } from "express";
 import { route, json, readJson, clientInfo, query } from "../lib/http.js";
 import { categorySettingSchema, linkUpdateSchema, stockAdjustSchema } from "../lib/schemas.js";
-import { OnlineCategory, PosCategorySetting } from "../lib/models.js";
+import { OnlineCategory, OnlineProduct, PosCategorySetting } from "../lib/models.js";
 import { listProducts, searchSellable, findBySku, updateLink, adjustLinkStock, syncProductLinks } from "../services/products.js";
 import { audit } from "../lib/audit.js";
 import { badRequest } from "../lib/errors.js";
@@ -133,7 +133,22 @@ router.get(
         }
         total += copies;
         if (total > MAX_TAGS_TOTAL) throw badRequest(`At most ${MAX_TAGS_TOTAL} tags in one print. Print in smaller batches.`);
-        groups.push({ sku: item.sku, name: item.name, size: item.size, color: item.color, price: item.price, mrp: item.mrp, copies });
+        groups.push({ sku: item.sku, productId: item.productId, name: item.name, size: item.size, color: item.color, price: item.price, mrp: item.mrp, copies });
+      }
+
+      // Product code and category for the label, from the product itself.
+      const ids = [...new Set(groups.filter((g) => g.productId).map((g) => g.productId))];
+      const products = await OnlineProduct.find({ _id: { $in: ids } }).select("productId categories").lean();
+      const cats = await OnlineCategory.find({ slug: { $in: products.flatMap((p) => p.categories || []) } }).select("slug label parent").lean();
+      const catBySlug = new Map(cats.map((c) => [c.slug, c]));
+      const productById = new Map(products.map((p) => [String(p._id), p]));
+      for (const g of groups) {
+        const p = productById.get(String(g.productId));
+        if (!p) continue;
+        const own = (p.categories || []).map((slug) => catBySlug.get(slug)).filter((c) => c && c.slug !== "new-arrivals");
+        g.code = p.productId || "";
+        g.category = (own.find((c) => c.parent) || own[0])?.label || "";
+        delete g.productId;
       }
       // The owner's tag layout (Settings → Tag design). The barcode is always printed.
       const tags = (await getSettings()).toObject().tags || {};

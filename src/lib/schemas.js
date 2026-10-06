@@ -151,6 +151,7 @@ const tagDesign = z.object({
   brand: z.string().trim().max(30),
   label: z.string().trim().max(14),
   showName: z.boolean(),
+  showCategory: z.boolean().optional().default(true),
   showColor: z.boolean(),
   showPrice: z.boolean(),
   showMrp: z.boolean(),

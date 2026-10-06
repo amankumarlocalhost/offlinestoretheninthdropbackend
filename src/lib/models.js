@@ -366,6 +366,7 @@ function tagSchema(label) {
     brand: { type: String, default: "THE NINTH DROP" },
     label: { type: String, default: label },
     showName: { type: Boolean, default: true },
+    showCategory: { type: Boolean, default: true },
     showColor: { type: Boolean, default: true },
     showPrice: { type: Boolean, default: true },
     showMrp: { type: Boolean, default: true },
