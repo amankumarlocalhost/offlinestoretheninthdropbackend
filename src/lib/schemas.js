@@ -145,6 +145,24 @@ const printCopy = z.object({
     .optional()
     .default([]),
 });
+// Owner's tag layout. At most 3 extra lines, so the barcode keeps enough height to scan.
+const tagDesign = z.object({
+  enabled: z.boolean(),
+  brand: z.string().trim().max(30),
+  label: z.string().trim().max(14),
+  showName: z.boolean(),
+  showColor: z.boolean(),
+  showPrice: z.boolean(),
+  showMrp: z.boolean(),
+  showSize: z.boolean(),
+  showSku: z.boolean(),
+  showPiece: z.boolean(),
+  fields: z
+    .array(z.object({ label: z.string().trim().max(16), text: z.string().trim().max(40) }))
+    .max(3, "At most 3 extra lines on a tag, so the barcode stays scannable")
+    .optional()
+    .default([]),
+});
 const timeStr = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:mm");
 export const settingsSchema = z.object({
   store: z
@@ -182,6 +200,7 @@ export const settingsSchema = z.object({
   security: z.object({ storeHoursOnly: z.boolean(), openTime: timeStr, closeTime: timeStr }).partial().optional(),
   stock: z.object({ lowStockThreshold: z.coerce.number().int().min(0).max(1000) }).partial().optional(),
   copies: z.object({ original: printCopy, pickup: printCopy }).partial().optional(),
+  tags: z.object({ original: tagDesign, pickup: tagDesign }).partial().optional(),
 });
 
 /* ── Catalog (owner) ──────────────────────────────────────────────────────── */

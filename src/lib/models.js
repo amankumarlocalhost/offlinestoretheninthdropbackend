@@ -358,6 +358,24 @@ function copySchema(label, topNote, bottomNote) {
   };
 }
 
+// What a price tag shows. The barcode is always printed and is not configurable.
+const tagFieldSchema = new Schema({ label: { type: String, default: "" }, text: { type: String, default: "" } }, { _id: false });
+function tagSchema(label) {
+  return {
+    enabled: { type: Boolean, default: true },
+    brand: { type: String, default: "THE NINTH DROP" },
+    label: { type: String, default: label },
+    showName: { type: Boolean, default: true },
+    showColor: { type: Boolean, default: true },
+    showPrice: { type: Boolean, default: true },
+    showMrp: { type: Boolean, default: true },
+    showSize: { type: Boolean, default: true },
+    showSku: { type: Boolean, default: true },
+    showPiece: { type: Boolean, default: true },
+    fields: { type: [tagFieldSchema], default: [] }, // owner's own lines, e.g. Fabric: Cotton
+  };
+}
+
 const settingsSchema = new Schema(
   {
     key: { type: String, default: "store" },
@@ -401,6 +419,11 @@ const settingsSchema = new Schema(
     copies: {
       original: copySchema("ORIGINAL", "Customer copy", ""),
       pickup: copySchema("PICKUP", "Show this slip at the pickup counter to collect your items.", ""),
+    },
+    // Each piece prints one tag per enabled entry: ORIGINAL then PICKUP.
+    tags: {
+      original: tagSchema("ORIGINAL"),
+      pickup: tagSchema("PICKUP"),
     },
     updatedBy: { type: String, default: "" },
   },

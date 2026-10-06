@@ -7,6 +7,7 @@ import { OnlineCategory, PosCategorySetting } from "../lib/models.js";
 import { listProducts, searchSellable, findBySku, updateLink, adjustLinkStock, syncProductLinks } from "../services/products.js";
 import { audit } from "../lib/audit.js";
 import { badRequest } from "../lib/errors.js";
+import { getSettings } from "../lib/settings.js";
 
 const router = Router();
 
@@ -134,7 +135,15 @@ router.get(
         if (total > MAX_TAGS_TOTAL) throw badRequest(`At most ${MAX_TAGS_TOTAL} tags in one print. Print in smaller batches.`);
         groups.push({ sku: item.sku, name: item.name, size: item.size, color: item.color, price: item.price, mrp: item.mrp, copies });
       }
-      return json({ groups, total });
+      // The owner's tag layout (Settings → Tag design). The barcode is always printed.
+      const tags = (await getSettings()).toObject().tags || {};
+      const design = [];
+      for (const key of ["original", "pickup"]) {
+        const t = tags[key] || {};
+        if (t.enabled === false) continue;
+        design.push({ key, ...t, fields: (t.fields || []).filter((f) => f.label || f.text) });
+      }
+      return json({ groups, total, design });
     },
     { permission: "products.edit" }
   )
