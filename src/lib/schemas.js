@@ -145,10 +145,12 @@ const printCopy = z.object({
     .optional()
     .default([]),
 });
-// Owner's tag layout. At most 3 extra lines, so the barcode keeps enough height to scan.
+// Owner's tag layout. Up to 8 extra lines (the horizontal tag prints the first 3,
+// so its barcode keeps enough height to scan).
 const tagDesign = z.object({
   enabled: z.boolean(),
   brand: z.string().trim().max(30),
+  showLogo: z.boolean().optional().default(true),
   label: z.string().trim().max(14),
   showName: z.boolean(),
   showCategory: z.boolean().optional().default(true),
@@ -159,8 +161,8 @@ const tagDesign = z.object({
   showSku: z.boolean(),
   showPiece: z.boolean(),
   fields: z
-    .array(z.object({ label: z.string().trim().max(16), text: z.string().trim().max(40) }))
-    .max(3, "At most 3 extra lines on a tag, so the barcode stays scannable")
+    .array(z.object({ label: z.string().trim().max(24), text: z.string().trim().max(160) }))
+    .max(8, "At most 8 extra lines on a tag")
     .optional()
     .default([]),
 });
@@ -201,7 +203,7 @@ export const settingsSchema = z.object({
   security: z.object({ storeHoursOnly: z.boolean(), openTime: timeStr, closeTime: timeStr }).partial().optional(),
   stock: z.object({ lowStockThreshold: z.coerce.number().int().min(0).max(1000) }).partial().optional(),
   copies: z.object({ original: printCopy, pickup: printCopy }).partial().optional(),
-  tags: z.object({ original: tagDesign, pickup: tagDesign }).partial().optional(),
+  tags: z.object({ layout: z.enum(["VERTICAL", "HORIZONTAL"]), original: tagDesign, pickup: tagDesign }).partial().optional(),
 });
 
 /* ── Catalog (owner) ──────────────────────────────────────────────────────── */

@@ -364,6 +364,7 @@ function tagSchema(label) {
   return {
     enabled: { type: Boolean, default: true },
     brand: { type: String, default: "THE NINTH DROP" },
+    showLogo: { type: Boolean, default: true },
     label: { type: String, default: label },
     showName: { type: Boolean, default: true },
     showCategory: { type: Boolean, default: true },
@@ -423,6 +424,8 @@ const settingsSchema = new Schema(
     },
     // Each piece prints one tag per enabled entry: ORIGINAL then PICKUP.
     tags: {
+      // VERTICAL = 55 × 85 mm upright tag (retail style); HORIZONTAL = 85 × 55 mm.
+      layout: { type: String, enum: ["VERTICAL", "HORIZONTAL"], default: "VERTICAL" },
       original: tagSchema("ORIGINAL"),
       pickup: tagSchema("PICKUP"),
     },

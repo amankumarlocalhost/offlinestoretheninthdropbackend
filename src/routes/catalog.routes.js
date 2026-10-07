@@ -151,14 +151,16 @@ router.get(
         delete g.productId;
       }
       // The owner's tag layout (Settings → Tag design). The barcode is always printed.
-      const tags = (await getSettings()).toObject().tags || {};
+      const settings = (await getSettings()).toObject();
+      const tags = settings.tags || {};
       const design = [];
       for (const key of ["original", "pickup"]) {
         const t = tags[key] || {};
         if (t.enabled === false) continue;
         design.push({ key, ...t, fields: (t.fields || []).filter((f) => f.label || f.text) });
       }
-      return json({ groups, total, design });
+      // Store logo from Settings → Store, printed on tags when "Logo" is on.
+      return json({ groups, total, design, layout: tags.layout || "VERTICAL", logo: settings.store?.logo || "" });
     },
     { permission: "products.edit" }
   )
