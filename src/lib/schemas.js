@@ -246,6 +246,14 @@ const uniqueKeys = (list) => {
   return new Set(keys).size === keys.length;
 };
 
+// A size row's own MRP, cost price and edition (all optional).
+const rowExtras = {
+  mrp: money.nullable().optional(),
+  cost: money.nullable().optional(),
+  edition: z.string().trim().max(40).optional(),
+  mrpCut: z.boolean().nullable().optional(),
+};
+
 export const productCreateSchema = z.object({
   ...productFields,
   description: productFields.description.optional().default(""),
@@ -258,7 +266,12 @@ export const productCreateSchema = z.object({
   badge: productFields.badge.optional().default(""),
   isActive: productFields.isActive.optional().default(true),
   // Sizes with their opening stock. Empty = one-size product using oneSizeStock.
-  variants: z.array(z.object({ size, stock: z.coerce.number().int().min(0).max(100000), price: money.nullable().optional() })).max(40).optional().default([]),
+  // Per row: own price, MRP, cost and edition (empty = the product's).
+  variants: z
+    .array(z.object({ size, stock: z.coerce.number().int().min(0).max(100000), price: money.nullable().optional(), ...rowExtras }))
+    .max(40)
+    .optional()
+    .default([]),
   oneSizeStock: z.coerce.number().int().min(0).max(100000).optional().default(0),
   costPrice: money.nullable().optional(),
 });
@@ -269,7 +282,7 @@ export const productUpdateSchema = z
   .object({
     ...productFields,
     variants: z
-      .array(z.object({ key: variantKey.optional(), size, stock: z.coerce.number().int().min(0).max(100000).optional().default(0), price: money.nullable().optional() }))
+      .array(z.object({ key: variantKey.optional(), size, stock: z.coerce.number().int().min(0).max(100000).optional().default(0), price: money.nullable().optional(), ...rowExtras }))
       .max(40)
       .refine(uniqueKeys, "Each size row only once"),
   })

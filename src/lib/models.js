@@ -36,7 +36,9 @@ const onlineVariantSchema = new Schema(
   // price: this size's own selling price; empty = the product price.
   // key: unique per product, so one size can have several rows (M at 700 and
   // M at 900). Empty on older rows, whose key is their size (lib/stock.js keyOf).
-  { key: String, size: String, color: String, sku: String, stock: Number, price: Number },
+  // mrp / edition: this row's own MRP and edition for the tag; empty = the product's.
+  // mrpCut: this row's tag shows MRP struck through + price; empty = the product's choice.
+  { key: String, size: String, color: String, sku: String, stock: Number, price: Number, mrp: Number, edition: String, mrpCut: Boolean },
   { _id: false }
 );
 const onlineProductSchema = new Schema(

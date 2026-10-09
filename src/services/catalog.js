@@ -180,6 +180,11 @@ function newVariantKey(size, used) {
   return key;
 }
 
+// The stored fields of a size row from the form: own price, MRP and edition.
+function rowFields(v) {
+  return { price: v.price > 0 ? v.price : null, mrp: v.mrp > 0 ? v.mrp : null, edition: (v.edition || "").trim(), mrpCut: typeof v.mrpCut === "boolean" ? v.mrpCut : null };
+}
+
 const uniqueSizes = (variants) => [...new Set(variants.map((v) => v.size))];
 
 function cleanPrices(price, originalPrice) {
@@ -195,6 +200,7 @@ export async function getProduct(id) {
   const own = cats.filter((c) => c.slug !== NEW_ARRIVALS);
   const chosen = own.find((c) => c.parent) || own[0];
   const skuOf = new Map(links.map((l) => [l.variantKey ?? "", l.sku]));
+  const costOf = new Map(links.map((l) => [l.variantKey ?? "", l.costPrice ?? null]));
   return {
     id: String(p._id),
     code: p.productId,
@@ -210,7 +216,17 @@ export async function getProduct(id) {
     images: p.images || [],
     badge: p.badge || "",
     isActive: p.isActive !== false,
-    variants: (p.variants || []).map((v) => ({ key: keyOf(v), size: v.size, stock: v.stock ?? 0, price: v.price > 0 ? v.price : null, sku: skuOf.get(keyOf(v)) || null })),
+    variants: (p.variants || []).map((v) => ({
+      key: keyOf(v),
+      size: v.size,
+      stock: v.stock ?? 0,
+      price: v.price > 0 ? v.price : null,
+      mrp: v.mrp > 0 ? v.mrp : null,
+      edition: v.edition || "",
+      mrpCut: typeof v.mrpCut === "boolean" ? v.mrpCut : null,
+      cost: costOf.get(keyOf(v)) ?? null,
+      sku: skuOf.get(keyOf(v)) || null,
+    })),
     stock: p.stock ?? 0,
     oneSizeSku: (p.variants || []).length ? null : skuOf.get("") || null,
   };
@@ -220,7 +236,7 @@ export async function createProduct(input, actor, info) {
   assertEditable();
   const categories = await categorySlugs(input.categoryId, input.newArrival);
   const used = new Set();
-  const variants = input.variants.map((v) => ({ key: newVariantKey(v.size, used), size: v.size, color: input.colorName || null, sku: "", stock: v.stock, price: v.price > 0 ? v.price : null }));
+  const variants = input.variants.map((v) => ({ key: newVariantKey(v.size, used), size: v.size, color: input.colorName || null, sku: "", stock: v.stock, ...rowFields(v) }));
   const stock = variants.length ? variants.reduce((a, v) => a + v.stock, 0) : input.oneSizeStock;
   const product = await OnlineProduct.create({
     productId: await nextProductCode(),
@@ -244,6 +260,11 @@ export async function createProduct(input, actor, info) {
   // Every size gets its SKU right away, ready for tags and billing.
   await syncProductLinks();
   if (input.costPrice != null) await PosProductLink.updateMany({ productId: product._id }, { $set: { costPrice: input.costPrice } });
+  // A row's own cost wins over the product cost.
+  for (let i = 0; i < variants.length; i++) {
+    const cost = input.variants[i].cost;
+    if (cost != null) await PosProductLink.updateOne({ productId: product._id, variantKey: variants[i].key }, { $set: { costPrice: cost } });
+  }
   await audit({ user: actor, action: "PRODUCT_CREATE", entity: "Product", entityId: product.productId, after: { name: product.name, price: product.price, sizes: product.sizes, stock }, ...info });
   return getProduct(product._id);
 }
@@ -279,6 +300,7 @@ export async function updateProduct(id, patch, actor, info) {
   const addedSizes = [];
   const removedSizes = [];
   const repriced = [];
+  const costs = []; // [row key, cost] to save on that row's SKU
   if (patch.variants) {
     const have = new Map((p.variants || []).map((v) => [keyOf(v), v]));
     const keep = patch.variants.filter((v) => v.key && have.has(v.key));
@@ -299,17 +321,27 @@ export async function updateProduct(id, patch, actor, info) {
     const color = set.colorName ?? p.colorName ?? null;
     for (const v of fresh) {
       const key = newVariantKey(v.size, used);
-      await OnlineProduct.updateOne({ _id: p._id }, { $push: { variants: { key, size: v.size, color, sku: "", stock: v.stock, price: v.price > 0 ? v.price : null } }, $inc: { stock: v.stock } });
+      await OnlineProduct.updateOne({ _id: p._id }, { $push: { variants: { key, size: v.size, color, sku: "", stock: v.stock, ...rowFields(v) } }, $inc: { stock: v.stock } });
       added.push(key);
+      if (v.cost != null) costs.push([key, v.cost]);
       addedSizes.push(v.size);
     }
     for (const v of keep) {
       const old = have.get(v.key);
-      if (v.price === undefined) continue;
-      const price = v.price > 0 ? v.price : null;
-      if ((old.price > 0 ? old.price : null) === price) continue;
-      await OnlineProduct.updateOne({ _id: p._id }, { $set: { "variants.$[v].price": price } }, { arrayFilters: [variantMatch(v.key, "v.")] });
-      repriced.push(`${old.size}: ${price ?? "default"}`);
+      // Only this row's price / MRP / edition change, never its stock.
+      const rowSet = {};
+      const next = rowFields(v);
+      for (const field of ["price", "mrp", "edition", "mrpCut"]) {
+        if (v[field] === undefined) continue;
+        const before =
+          field === "edition" ? old.edition || "" : field === "mrpCut" ? (typeof old.mrpCut === "boolean" ? old.mrpCut : null) : old[field] > 0 ? old[field] : null;
+        if (before !== next[field]) rowSet[`variants.$[v].${field}`] = next[field];
+      }
+      if (Object.keys(rowSet).length) {
+        await OnlineProduct.updateOne({ _id: p._id }, { $set: rowSet }, { arrayFilters: [variantMatch(v.key, "v.")] });
+        repriced.push(`${old.size}: ${Object.keys(rowSet).map((k) => k.split(".").pop()).join(", ")}`);
+      }
+      if (v.cost !== undefined) costs.push([v.key, v.cost]);
     }
     // The size list follows the rows: each size once.
     if (added.length || removed.length) {
@@ -336,6 +368,8 @@ export async function updateProduct(id, patch, actor, info) {
     const cost = (await PosProductLink.findOne({ productId: p._id, costPrice: { $ne: null } }).lean())?.costPrice;
     if (cost != null) await PosProductLink.updateMany({ productId: p._id, variantKey: { $in: added }, costPrice: null }, { $set: { costPrice: cost } });
   }
+  // Each row's cost lives on its SKU (used for profit in reports).
+  for (const [key, cost] of costs) await PosProductLink.updateOne({ productId: p._id, variantKey: key }, { $set: { costPrice: cost ?? null } });
 
   await audit({ user: actor, action: "PRODUCT_UPDATE", entity: "Product", entityId: p.productId, before: { name: p.name, price: p.price }, after: { ...set, addedSizes, removedSizes, sizePrices: repriced }, ...info });
   return getProduct(id);

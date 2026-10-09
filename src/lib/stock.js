@@ -36,17 +36,19 @@ function hasVariantFor(product, variantKey) {
   return false;
 }
 
-// Selling price and MRP for one size row. A row can carry its own price;
-// without one it sells at the product price. MRP is shown only when higher.
+// Selling price and MRP for one size row. A row can carry its own price and
+// MRP; without them it uses the product's. MRP is never below the price.
 export function priceFor(product, variantKey) {
   let price = product.price;
+  let mrp = product.originalPrice || 0;
   if (variantKey) {
     for (const v of product.variants || []) {
-      if (keyOf(v) === variantKey && v.price > 0) price = v.price;
+      if (keyOf(v) !== variantKey) continue;
+      if (v.price > 0) price = v.price;
+      if (v.mrp > 0) mrp = v.mrp;
     }
   }
-  const mrp = product.originalPrice && product.originalPrice > price ? product.originalPrice : price;
-  return { price, mrp };
+  return { price, mrp: mrp > price ? mrp : price };
 }
 
 // How many units can be sold right now for this product + size.

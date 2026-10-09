@@ -3,7 +3,7 @@
 import { Router } from "express";
 import { route, json, readJson, clientInfo, query } from "../lib/http.js";
 import { categorySettingSchema, linkUpdateSchema, stockAdjustSchema } from "../lib/schemas.js";
-import { OnlineCategory, OnlineProduct, PosCategorySetting } from "../lib/models.js";
+import { OnlineCategory, OnlineProduct, PosCategorySetting, PosProductLink } from "../lib/models.js";
 import { listProducts, searchSellable, findBySku, updateLink, adjustLinkStock, syncProductLinks } from "../services/products.js";
 import { audit } from "../lib/audit.js";
 import { badRequest } from "../lib/errors.js";
@@ -138,7 +138,10 @@ router.get(
 
       // Product code and category for the label, from the product itself.
       const ids = [...new Set(groups.filter((g) => g.productId).map((g) => g.productId))];
-      const products = await OnlineProduct.find({ _id: { $in: ids } }).select("productId categories fabric showMrpCut").lean();
+      const products = await OnlineProduct.find({ _id: { $in: ids } }).select("productId categories fabric showMrpCut variants").lean();
+      // Which size row each SKU is, for that row's own edition.
+      const linkRows = await PosProductLink.find({ sku: { $in: groups.map((g) => g.sku) } }).select("sku variantKey").lean();
+      const rowOfSku = new Map(linkRows.map((l) => [l.sku, l.variantKey]));
       const cats = await OnlineCategory.find({ slug: { $in: products.flatMap((p) => p.categories || []) } }).select("slug label parent").lean();
       const catBySlug = new Map(cats.map((c) => [c.slug, c]));
       const catById = new Map(cats.map((c) => [String(c._id), c]));
@@ -149,8 +152,11 @@ router.get(
         if (!p) continue;
         const own = (p.categories || []).map((slug) => catBySlug.get(slug)).filter((c) => c && c.slug !== "new-arrivals");
         g.code = p.productId || "";
-        g.fabric = p.fabric || "";
-        g.showMrpCut = Boolean(p.showMrpCut);
+        const row = (p.variants || []).find((v) => (v.key || v.size) === rowOfSku.get(g.sku));
+        g.fabric = row?.edition || p.fabric || "";
+        // This size row's own MRP-cut choice wins; otherwise the product's.
+        const rowCut = (p.variants || []).find((v) => (v.key || v.size) === rowOfSku.get(g.sku))?.mrpCut;
+        g.showMrpCut = typeof rowCut === "boolean" ? rowCut : Boolean(p.showMrpCut);
         // The tag shows the category's short code (e.g. BW), not its full name:
         // the sub-category's code, else its main category's, else the one in the SKU.
         const chosen = own.find((c) => c.parent) || own[0];
