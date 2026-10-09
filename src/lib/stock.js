@@ -7,29 +7,42 @@ import { AppError } from "./errors.js";
  * It mirrors exactly what the online order flow does
  * (theninebackend/src/services/order.service.js decrementStock/restockItems):
  *   - the product-level `stock` and, when the size has its own variant row,
- *     `variants[size].stock` move together in ONE conditional update, so the
+ *     that row's `stock` move together in ONE conditional update, so the
  *     check and the decrement are atomic and stock can never go negative;
  *   - `inStock` is flipped when stock reaches zero (or comes back), so the
  *     website shows the right availability.
  * Online code is not touched.
  */
 
+// A variant row is identified by its `key`. One size can have several rows
+// (e.g. two M at different prices), so the size alone is not enough. Rows made
+// before keys existed have none: their key is their size.
+export function keyOf(variant) {
+  return variant.key || variant.size;
+}
+
+// Mongo condition for "the variant row with this key", for $elemMatch
+// (prefix "") and arrayFilters (prefix "v.").
+export function variantMatch(variantKey, prefix = "") {
+  return { $or: [{ [`${prefix}key`]: variantKey }, { [`${prefix}key`]: null, [`${prefix}size`]: variantKey }] };
+}
+
 function hasVariantFor(product, variantKey) {
   if (!variantKey) return false;
   const variants = product.variants || [];
   for (const v of variants) {
-    if (v.size === variantKey) return true;
+    if (keyOf(v) === variantKey) return true;
   }
   return false;
 }
 
-// Selling price and MRP for one size. A size can carry its own price;
+// Selling price and MRP for one size row. A row can carry its own price;
 // without one it sells at the product price. MRP is shown only when higher.
 export function priceFor(product, variantKey) {
   let price = product.price;
   if (variantKey) {
     for (const v of product.variants || []) {
-      if (v.size === variantKey && v.price > 0) price = v.price;
+      if (keyOf(v) === variantKey && v.price > 0) price = v.price;
     }
   }
   const mrp = product.originalPrice && product.originalPrice > price ? product.originalPrice : price;
@@ -41,7 +54,7 @@ export function availableQty(product, variantKey) {
   const total = Number(product.stock || 0);
   if (!hasVariantFor(product, variantKey)) return Math.max(0, total);
   for (const v of product.variants) {
-    if (v.size === variantKey) return Math.max(0, Math.min(total, Number(v.stock || 0)));
+    if (keyOf(v) === variantKey) return Math.max(0, Math.min(total, Number(v.stock || 0)));
   }
   return 0;
 }
@@ -73,9 +86,9 @@ export async function decreaseStock({ productId, variantKey, qty, sku, session }
   const update = { $inc: { stock: -qty } };
   const options = { session };
   if (hasVariantFor(product, variantKey)) {
-    filter.variants = { $elemMatch: { size: variantKey, stock: { $gte: qty } } };
+    filter.variants = { $elemMatch: { ...variantMatch(variantKey), stock: { $gte: qty } } };
     update.$inc["variants.$[v].stock"] = -qty;
-    options.arrayFilters = [{ "v.size": variantKey }];
+    options.arrayFilters = [variantMatch(variantKey, "v.")];
   }
 
   const result = await OnlineProduct.updateOne(filter, update, options);
@@ -93,7 +106,7 @@ export async function increaseStock({ productId, variantKey, qty, session }) {
   const options = { session };
   if (hasVariantFor(product, variantKey)) {
     update.$inc["variants.$[v].stock"] = qty;
-    options.arrayFilters = [{ "v.size": variantKey }];
+    options.arrayFilters = [variantMatch(variantKey, "v.")];
   }
   await OnlineProduct.updateOne({ _id: productId }, update, options);
 }

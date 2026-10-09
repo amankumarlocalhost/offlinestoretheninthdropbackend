@@ -34,7 +34,9 @@ const readOnlyOpts = { timestamps: true, autoIndex: false, autoCreate: false, st
 
 const onlineVariantSchema = new Schema(
   // price: this size's own selling price; empty = the product price.
-  { size: String, color: String, sku: String, stock: Number, price: Number },
+  // key: unique per product, so one size can have several rows (M at 700 and
+  // M at 900). Empty on older rows, whose key is their size (lib/stock.js keyOf).
+  { key: String, size: String, color: String, sku: String, stock: Number, price: Number },
   { _id: false }
 );
 const onlineProductSchema = new Schema(
@@ -131,7 +133,7 @@ const productLinkSchema = new Schema(
   {
     sku: { type: String, required: true, uppercase: true, trim: true },
     productId: { type: ObjectId, required: true },
-    // How the online product identifies the variant: its size (null = no sizes).
+    // The variant row's key (its size on older rows; null = no sizes).
     variantKey: { type: String, default: null },
     size: { type: String, default: null },
     color: { type: String, default: null },

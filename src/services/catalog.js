@@ -9,6 +9,7 @@ import { OnlineProduct, OnlineCategory, PosCategorySetting, PosProductLink, PosS
 import { AppError, badRequest, notFound, conflict } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
 import { syncProductLinks } from "./products.js";
+import { keyOf, variantMatch } from "../lib/stock.js";
 
 const LIVE_DBS = new Set(["thenine", ...String(process.env.LIVE_DB_NAME || "").split(",").map((s) => s.trim()).filter(Boolean)]);
 const NEW_ARRIVALS = "new-arrivals";
@@ -170,6 +171,17 @@ async function nextProductCode() {
   return `p${String(doc.seq).padStart(3, "0")}`;
 }
 
+// Key for a new size row: the size itself, or "M~2", "M~3", … when that size
+// already has a row (several prices for one size).
+function newVariantKey(size, used) {
+  let key = size;
+  for (let n = 2; used.has(key); n++) key = `${size}~${n}`;
+  used.add(key);
+  return key;
+}
+
+const uniqueSizes = (variants) => [...new Set(variants.map((v) => v.size))];
+
 function cleanPrices(price, originalPrice) {
   // MRP is only kept when it is really higher than the selling price.
   return { price, originalPrice: originalPrice && originalPrice > price ? originalPrice : null };
@@ -198,7 +210,7 @@ export async function getProduct(id) {
     images: p.images || [],
     badge: p.badge || "",
     isActive: p.isActive !== false,
-    variants: (p.variants || []).map((v) => ({ size: v.size, stock: v.stock ?? 0, price: v.price > 0 ? v.price : null, sku: skuOf.get(v.size) || null })),
+    variants: (p.variants || []).map((v) => ({ key: keyOf(v), size: v.size, stock: v.stock ?? 0, price: v.price > 0 ? v.price : null, sku: skuOf.get(keyOf(v)) || null })),
     stock: p.stock ?? 0,
     oneSizeSku: (p.variants || []).length ? null : skuOf.get("") || null,
   };
@@ -207,7 +219,8 @@ export async function getProduct(id) {
 export async function createProduct(input, actor, info) {
   assertEditable();
   const categories = await categorySlugs(input.categoryId, input.newArrival);
-  const variants = input.variants.map((v) => ({ size: v.size, color: input.colorName || null, sku: "", stock: v.stock, price: v.price > 0 ? v.price : null }));
+  const used = new Set();
+  const variants = input.variants.map((v) => ({ key: newVariantKey(v.size, used), size: v.size, color: input.colorName || null, sku: "", stock: v.stock, price: v.price > 0 ? v.price : null }));
   const stock = variants.length ? variants.reduce((a, v) => a + v.stock, 0) : input.oneSizeStock;
   const product = await OnlineProduct.create({
     productId: await nextProductCode(),
@@ -220,7 +233,7 @@ export async function createProduct(input, actor, info) {
     colorName: input.colorName,
     fabric: input.fabric,
     showMrpCut: input.showMrpCut,
-    sizes: variants.map((v) => v.size),
+    sizes: uniqueSizes(variants),
     variants,
     stock,
     inStock: stock > 0,
@@ -239,9 +252,10 @@ export async function createProduct(input, actor, info) {
  * Edits a product without ever overwriting its stock numbers, because a sale
  * may change them at the same moment. Each step is its own targeted update:
  *   - plain fields are $set;
- *   - a removed size is $pulled only while its stock is 0;
- *   - a new size is $pushed and its opening stock $inc'ed onto the total;
- *   - a size's own price is $set on just that size.
+ *   - size rows are matched by key, so one size can have several rows;
+ *   - a removed row is $pulled only while its stock is 0;
+ *   - a new row is $pushed and its opening stock $inc'ed onto the total;
+ *   - a row's own price is $set on just that row.
  * Stock of existing sizes is changed with the Stock button (reason + audit).
  */
 export async function updateProduct(id, patch, actor, info) {
@@ -260,35 +274,47 @@ export async function updateProduct(id, patch, actor, info) {
   }
   if (Object.keys(set).length) await OnlineProduct.updateOne({ _id: p._id }, { $set: set });
 
-  const added = [];
-  const removed = [];
+  const added = []; // keys of new rows
+  const removed = []; // keys of removed rows
+  const addedSizes = [];
+  const removedSizes = [];
   const repriced = [];
   if (patch.variants) {
-    const have = new Map((p.variants || []).map((v) => [v.size.toUpperCase(), v]));
-    const want = new Map(patch.variants.map((v) => [v.size.toUpperCase(), v]));
+    const have = new Map((p.variants || []).map((v) => [keyOf(v), v]));
+    const keep = patch.variants.filter((v) => v.key && have.has(v.key));
+    const fresh = patch.variants.filter((v) => !(v.key && have.has(v.key)));
     const wasOneSize = !(p.variants || []).length;
-    if (wasOneSize && want.size && (p.stock || 0) > 0) {
+    if (wasOneSize && patch.variants.length && (p.stock || 0) > 0) {
       throw badRequest(`This product has ${p.stock} in stock without sizes. Set its stock to 0 with the Stock button before adding sizes.`);
     }
+    const keptKeys = new Set(keep.map((v) => v.key));
     for (const [key, v] of have) {
-      if (want.has(key)) continue;
-      const res = await OnlineProduct.updateOne({ _id: p._id, variants: { $elemMatch: { size: v.size, stock: { $lte: 0 } } } }, { $pull: { variants: { size: v.size }, sizes: v.size } });
+      if (keptKeys.has(key)) continue;
+      const res = await OnlineProduct.updateOne({ _id: p._id, variants: { $elemMatch: { ...variantMatch(key), stock: { $lte: 0 } } } }, { $pull: { variants: variantMatch(key) } });
       if (!res.modifiedCount) throw badRequest(`Size ${v.size} still has stock. Set it to 0 with the Stock button before removing the size.`);
-      removed.push(v.size);
+      removed.push(key);
+      removedSizes.push(v.size);
     }
-    for (const [key, v] of want) {
-      if (have.has(key)) continue;
-      const color = set.colorName ?? p.colorName ?? null;
-      await OnlineProduct.updateOne({ _id: p._id }, { $push: { variants: { size: v.size, color, sku: "", stock: v.stock, price: v.price > 0 ? v.price : null } }, $addToSet: { sizes: v.size }, $inc: { stock: v.stock } });
-      added.push(v.size);
+    const used = new Set(keptKeys);
+    const color = set.colorName ?? p.colorName ?? null;
+    for (const v of fresh) {
+      const key = newVariantKey(v.size, used);
+      await OnlineProduct.updateOne({ _id: p._id }, { $push: { variants: { key, size: v.size, color, sku: "", stock: v.stock, price: v.price > 0 ? v.price : null } }, $inc: { stock: v.stock } });
+      added.push(key);
+      addedSizes.push(v.size);
     }
-    for (const [key, v] of want) {
-      const old = have.get(key);
-      if (!old || v.price === undefined) continue;
+    for (const v of keep) {
+      const old = have.get(v.key);
+      if (v.price === undefined) continue;
       const price = v.price > 0 ? v.price : null;
       if ((old.price > 0 ? old.price : null) === price) continue;
-      await OnlineProduct.updateOne({ _id: p._id }, { $set: { "variants.$[v].price": price } }, { arrayFilters: [{ "v.size": old.size }] });
+      await OnlineProduct.updateOne({ _id: p._id }, { $set: { "variants.$[v].price": price } }, { arrayFilters: [variantMatch(v.key, "v.")] });
       repriced.push(`${old.size}: ${price ?? "default"}`);
+    }
+    // The size list follows the rows: each size once.
+    if (added.length || removed.length) {
+      const now = await OnlineProduct.findById(p._id).select("variants").lean();
+      await OnlineProduct.updateOne({ _id: p._id }, { $set: { sizes: uniqueSizes(now.variants || []) } });
     }
   }
 
@@ -311,7 +337,7 @@ export async function updateProduct(id, patch, actor, info) {
     if (cost != null) await PosProductLink.updateMany({ productId: p._id, variantKey: { $in: added }, costPrice: null }, { $set: { costPrice: cost } });
   }
 
-  await audit({ user: actor, action: "PRODUCT_UPDATE", entity: "Product", entityId: p.productId, before: { name: p.name, price: p.price }, after: { ...set, addedSizes: added, removedSizes: removed, sizePrices: repriced }, ...info });
+  await audit({ user: actor, action: "PRODUCT_UPDATE", entity: "Product", entityId: p.productId, before: { name: p.name, price: p.price }, after: { ...set, addedSizes, removedSizes, sizePrices: repriced }, ...info });
   return getProduct(id);
 }
 

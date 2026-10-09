@@ -238,7 +238,13 @@ const productFields = {
   badge: z.string().trim().max(20),
   isActive: z.boolean(),
 };
-const uniqueSizes = (list) => new Set(list.map((v) => v.size.toUpperCase())).size === list.length;
+// A size may repeat (M at 700 and M at 900); rows that already exist send
+// their key, which must be unique. New rows have no key yet.
+const variantKey = z.string().trim().min(1).max(30);
+const uniqueKeys = (list) => {
+  const keys = list.filter((v) => v.key).map((v) => v.key);
+  return new Set(keys).size === keys.length;
+};
 
 export const productCreateSchema = z.object({
   ...productFields,
@@ -252,7 +258,7 @@ export const productCreateSchema = z.object({
   badge: productFields.badge.optional().default(""),
   isActive: productFields.isActive.optional().default(true),
   // Sizes with their opening stock. Empty = one-size product using oneSizeStock.
-  variants: z.array(z.object({ size, stock: z.coerce.number().int().min(0).max(100000), price: money.nullable().optional() })).max(20).refine(uniqueSizes, "Each size only once").optional().default([]),
+  variants: z.array(z.object({ size, stock: z.coerce.number().int().min(0).max(100000), price: money.nullable().optional() })).max(40).optional().default([]),
   oneSizeStock: z.coerce.number().int().min(0).max(100000).optional().default(0),
   costPrice: money.nullable().optional(),
 });
@@ -262,6 +268,9 @@ export const productCreateSchema = z.object({
 export const productUpdateSchema = z
   .object({
     ...productFields,
-    variants: z.array(z.object({ size, stock: z.coerce.number().int().min(0).max(100000).optional().default(0), price: money.nullable().optional() })).max(20).refine(uniqueSizes, "Each size only once"),
+    variants: z
+      .array(z.object({ key: variantKey.optional(), size, stock: z.coerce.number().int().min(0).max(100000).optional().default(0), price: money.nullable().optional() }))
+      .max(40)
+      .refine(uniqueKeys, "Each size row only once"),
   })
   .partial();

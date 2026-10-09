@@ -141,6 +141,8 @@ router.get(
       const products = await OnlineProduct.find({ _id: { $in: ids } }).select("productId categories fabric showMrpCut").lean();
       const cats = await OnlineCategory.find({ slug: { $in: products.flatMap((p) => p.categories || []) } }).select("slug label parent").lean();
       const catBySlug = new Map(cats.map((c) => [c.slug, c]));
+      const catById = new Map(cats.map((c) => [String(c._id), c]));
+      const shortBySlug = new Map((await PosCategorySetting.find().select("categorySlug code").lean()).map((s) => [s.categorySlug, s.code]));
       const productById = new Map(products.map((p) => [String(p._id), p]));
       for (const g of groups) {
         const p = productById.get(String(g.productId));
@@ -149,7 +151,11 @@ router.get(
         g.code = p.productId || "";
         g.fabric = p.fabric || "";
         g.showMrpCut = Boolean(p.showMrpCut);
-        g.category = (own.find((c) => c.parent) || own[0])?.label || "";
+        // The tag shows the category's short code (e.g. BW), not its full name:
+        // the sub-category's code, else its main category's, else the one in the SKU.
+        const chosen = own.find((c) => c.parent) || own[0];
+        const parent = chosen?.parent && catById.get(String(chosen.parent));
+        g.category = (chosen && shortBySlug.get(chosen.slug)) || (parent && shortBySlug.get(parent.slug)) || g.sku.split("-")[1] || "";
         delete g.productId;
       }
       // The owner's tag layout (Settings → Tag design). The barcode is always printed.

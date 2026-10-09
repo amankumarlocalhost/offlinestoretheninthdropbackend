@@ -1,5 +1,5 @@
 import { OnlineProduct, OnlineCategory, PosProductLink, PosCategorySetting } from "../lib/models.js";
-import { availableQty, adjustStock, priceFor } from "../lib/stock.js";
+import { availableQty, adjustStock, priceFor, keyOf } from "../lib/stock.js";
 import { nextProductNo } from "../lib/counters.js";
 import { hasPermission } from "../lib/permissions.js";
 import { badRequest, notFound } from "../lib/errors.js";
@@ -7,31 +7,45 @@ import { escapeRegex } from "../lib/validate.js";
 import { withTransaction } from "../lib/db.js";
 import { audit } from "../lib/audit.js";
 
-// Sizes a product can be sold in. Online identifies a variant by its size;
-// sizes listed without their own variant row share the product-level stock.
+// Rows a product can be sold in, by variant key (one size can have several rows,
+// e.g. M at 700 and M at 900). Sizes listed without their own variant row
+// share the product-level stock and use the size as key.
 function variantKeysOf(product) {
   const keys = [];
+  const sized = new Set();
   for (const v of product.variants || []) {
-    if (v.size && !keys.includes(v.size)) keys.push(v.size);
+    if (!v.size) continue;
+    sized.add(v.size);
+    if (!keys.includes(keyOf(v))) keys.push(keyOf(v));
   }
   for (const s of product.sizes || []) {
-    if (s && !keys.includes(s)) keys.push(s);
+    if (s && !sized.has(s) && !keys.includes(s)) keys.push(s);
   }
   if (keys.length === 0) keys.push(null); // one-size product
   return keys;
 }
 
-function colorFor(product, variantKey) {
+function variantFor(product, variantKey) {
   for (const v of product.variants || []) {
-    if (v.size === variantKey && v.color) return v.color;
+    if (keyOf(v) === variantKey) return v;
   }
-  return product.colorName || null;
+  return null;
 }
 
+// The size printed on tags and bills for a variant key.
+function sizeFor(product, variantKey) {
+  return variantFor(product, variantKey)?.size ?? variantKey;
+}
+
+function colorFor(product, variantKey) {
+  return variantFor(product, variantKey)?.color || product.colorName || null;
+}
+
+// Free-size products end in "-FS". SKUs made earlier keep their "-OS".
 function sizeCode(size) {
-  if (!size) return "OS";
+  if (!size) return "FS";
   const code = String(size).toUpperCase().replace(/[^A-Z0-9]/g, "");
-  return code.slice(0, 6) || "OS";
+  return code.slice(0, 6) || "FS";
 }
 
 async function categoryCodeFor(product, settingsBySlug, structuralSlugs) {
@@ -87,15 +101,17 @@ export async function syncProductLinks() {
         const cat = await categoryCodeFor(product, settingsBySlug, structuralSlugs);
         base = `TND-${cat}-${await productNumber(product)}`;
       }
-      let sku = `${base}-${sizeCode(key)}`;
+      // A second row of the same size gets "-2", "-3", … on its SKU.
+      const size = sizeFor(product, key);
+      let sku = `${base}-${sizeCode(size)}`;
       let n = 2;
-      while (usedSkus.has(sku)) sku = `${base}-${sizeCode(key)}-${n++}`;
+      while (usedSkus.has(sku)) sku = `${base}-${sizeCode(size)}-${n++}`;
       usedSkus.add(sku);
       await PosProductLink.create({
         sku,
         productId: product._id,
         variantKey: key,
-        size: key,
+        size,
         color: colorFor(product, key),
       });
       created += 1;
@@ -228,7 +244,7 @@ export async function listProducts({ q, page = 1, limit = 30, linkFilter, catego
       if (link) {
         sizes.push({ linked: true, ...shapeItem(link, p, permissions) });
       } else {
-        const row = { linked: false, size: key, sku: null, inStock: availableQty(p, key) > 0 };
+        const row = { linked: false, size: sizeFor(p, key), sku: null, inStock: availableQty(p, key) > 0 };
         if (hasPermission(permissions, "products.viewStock")) row.stock = availableQty(p, key);
         sizes.push(row);
       }
