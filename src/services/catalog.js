@@ -193,6 +193,8 @@ export async function getProduct(id) {
     price: p.price,
     originalPrice: p.originalPrice ?? null,
     colorName: p.colorName || "",
+    fabric: p.fabric || "",
+    showMrpCut: Boolean(p.showMrpCut),
     images: p.images || [],
     badge: p.badge || "",
     isActive: p.isActive !== false,
@@ -216,6 +218,8 @@ export async function createProduct(input, actor, info) {
     ...cleanPrices(input.price, input.originalPrice),
     images: input.images,
     colorName: input.colorName,
+    fabric: input.fabric,
+    showMrpCut: input.showMrpCut,
     sizes: variants.map((v) => v.size),
     variants,
     stock,
@@ -246,7 +250,7 @@ export async function updateProduct(id, patch, actor, info) {
   if (!p) throw notFound("Product not found.");
 
   const set = {};
-  for (const key of ["name", "description", "colorName", "images", "badge", "isActive"]) if (patch[key] !== undefined) set[key] = patch[key];
+  for (const key of ["name", "description", "colorName", "fabric", "showMrpCut", "images", "badge", "isActive"]) if (patch[key] !== undefined) set[key] = patch[key];
   if (patch.price !== undefined || patch.originalPrice !== undefined) {
     Object.assign(set, cleanPrices(patch.price ?? p.price, patch.originalPrice !== undefined ? patch.originalPrice : p.originalPrice));
   }

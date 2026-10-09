@@ -138,7 +138,7 @@ router.get(
 
       // Product code and category for the label, from the product itself.
       const ids = [...new Set(groups.filter((g) => g.productId).map((g) => g.productId))];
-      const products = await OnlineProduct.find({ _id: { $in: ids } }).select("productId categories").lean();
+      const products = await OnlineProduct.find({ _id: { $in: ids } }).select("productId categories fabric showMrpCut").lean();
       const cats = await OnlineCategory.find({ slug: { $in: products.flatMap((p) => p.categories || []) } }).select("slug label parent").lean();
       const catBySlug = new Map(cats.map((c) => [c.slug, c]));
       const productById = new Map(products.map((p) => [String(p._id), p]));
@@ -147,6 +147,8 @@ router.get(
         if (!p) continue;
         const own = (p.categories || []).map((slug) => catBySlug.get(slug)).filter((c) => c && c.slug !== "new-arrivals");
         g.code = p.productId || "";
+        g.fabric = p.fabric || "";
+        g.showMrpCut = Boolean(p.showMrpCut);
         g.category = (own.find((c) => c.parent) || own[0])?.label || "";
         delete g.productId;
       }

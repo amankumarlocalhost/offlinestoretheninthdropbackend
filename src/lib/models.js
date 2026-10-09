@@ -48,6 +48,8 @@ const onlineProductSchema = new Schema(
     originalPrice: Number,
     images: [String],
     colorName: String,
+    fabric: String, // printed on the tag, e.g. Cotton, Wool
+    showMrpCut: Boolean, // tag shows MRP struck through + selling price (else MRP only)
     sizes: [String],
     variants: [onlineVariantSchema],
     stock: Number,
