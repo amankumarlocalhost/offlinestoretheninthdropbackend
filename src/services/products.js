@@ -42,6 +42,17 @@ function colorFor(product, variantKey) {
 }
 
 // Free-size products end in "-FS". SKUs made earlier keep their "-OS".
+// The cost hidden in the SKU: cost × 2 (₹755 → "1510"). Empty when no cost.
+export function costCode(cost) {
+  return cost > 0 ? String(Math.round(cost * 2)) : "";
+}
+
+// TND-BW-0044 + cost code + size, e.g. TND-BW-0044-1510-28.
+function skuStem(base, cost, size) {
+  const code = costCode(cost);
+  return `${base}-${code ? `${code}-` : ""}${sizeCode(size)}`;
+}
+
 function sizeCode(size) {
   if (!size) return "FS";
   const code = String(size).toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -71,12 +82,12 @@ async function productNumber(product) {
  * Creates a pos_product_links row for every product+size that does not have
  * one yet. Writes ONLY to pos_product_links.
  */
-export async function syncProductLinks() {
+export async function syncProductLinks({ costs = new Map() } = {}) {
   const [products, categorySettings, categories, existing] = await Promise.all([
     OnlineProduct.find({ isActive: { $ne: false } }).lean(),
     PosCategorySetting.find().lean(),
     OnlineCategory.find().select("slug kind").lean(),
-    PosProductLink.find().select("productId variantKey sku").lean(),
+    PosProductLink.find().select("productId variantKey sku aliases").lean(),
   ]);
 
   const settingsBySlug = new Map();
@@ -89,6 +100,7 @@ export async function syncProductLinks() {
   for (const l of existing) {
     have.add(`${l.productId}:${l.variantKey ?? ""}`);
     usedSkus.add(l.sku);
+    for (const a of l.aliases || []) usedSkus.add(a);
   }
 
   let created = 0;
@@ -101,11 +113,14 @@ export async function syncProductLinks() {
         const cat = await categoryCodeFor(product, settingsBySlug, structuralSlugs);
         base = `TND-${cat}-${await productNumber(product)}`;
       }
-      // A second row of the same size gets "-2", "-3", … on its SKU.
+      // Cost code in the SKU when the cost is known; a row with the same
+      // SKU as another gets "-2", "-3", … on the end.
       const size = sizeFor(product, key);
-      let sku = `${base}-${sizeCode(size)}`;
+      const cost = costs.get(`${product._id}:${key ?? ""}`) ?? null;
+      const stem = skuStem(base, cost, size);
+      let sku = stem;
       let n = 2;
-      while (usedSkus.has(sku)) sku = `${base}-${sizeCode(size)}-${n++}`;
+      while (usedSkus.has(sku)) sku = `${stem}-${n++}`;
       usedSkus.add(sku);
       await PosProductLink.create({
         sku,
@@ -113,6 +128,7 @@ export async function syncProductLinks() {
         variantKey: key,
         size,
         color: colorFor(product, key),
+        costPrice: cost,
       });
       created += 1;
     }
@@ -145,14 +161,54 @@ function shapeItem(link, product, permissions) {
 
 // Finds a SKU link. Tag barcodes hold the SKU without dashes ("TNDBW004428"
 // for TND-BW-0044-28), so a code without dashes matches with or without them.
+// Older SKUs of a size (before a cost-code change) are kept as aliases, so
+// tags printed with them still scan.
 export async function findLinkBySku(sku, session = null) {
   const code = String(sku).trim().toUpperCase();
-  let link = await PosProductLink.findOne({ sku: code }).session(session).lean();
-  if (!link && /^[A-Z0-9]{3,40}$/.test(code)) {
-    const rx = new RegExp(`^${code.split("").join("-?")}$`);
-    link = await PosProductLink.findOne({ sku: rx }).session(session).lean();
+  let link =
+    (await PosProductLink.findOne({ sku: code }).session(session).lean()) ||
+    (await PosProductLink.findOne({ aliases: code }).session(session).lean());
+  const bare = code.replace(/-/g, "");
+  if (!link && /^[A-Z0-9]{3,40}$/.test(bare)) {
+    const rx = new RegExp(`^${bare.split("").join("-?")}$`);
+    link =
+      (await PosProductLink.findOne({ sku: rx }).session(session).lean()) ||
+      (await PosProductLink.findOne({ aliases: rx }).session(session).lean());
   }
   return link;
+}
+
+/**
+ * Puts the current cost code into SKUs (TND-BW-0044-28 with cost ₹755 →
+ * TND-BW-0044-1510-28). The old SKU is kept as an alias, so printed tags still
+ * scan. Only SKUs in the TND-<letters>-<number>-… shape are changed; one
+ * product, or all of them.
+ */
+export async function refreshSkuCodes(productId = null) {
+  const [links, all] = await Promise.all([
+    PosProductLink.find(productId ? { productId } : {}).sort({ createdAt: 1 }),
+    PosProductLink.find().select("sku aliases").lean(),
+  ]);
+  const taken = new Set();
+  for (const l of all) {
+    taken.add(l.sku);
+    for (const a of l.aliases || []) taken.add(a);
+  }
+  let changed = 0;
+  for (const link of links) {
+    const m = /^(TND-[A-Z]+-\d+)-/.exec(link.sku);
+    if (!m) continue;
+    const stem = skuStem(m[1], link.costPrice, link.size);
+    if (link.sku === stem || new RegExp(`^${stem}-\\d+$`).test(link.sku)) continue;
+    let sku = stem;
+    for (let n = 2; taken.has(sku); n++) sku = `${stem}-${n}`;
+    taken.add(sku);
+    link.aliases = [...new Set([...(link.aliases || []), link.sku])];
+    link.sku = sku;
+    await link.save();
+    changed += 1;
+  }
+  return { changed };
 }
 
 export async function findBySku(sku, permissions) {
@@ -288,6 +344,11 @@ export async function updateLink(sku, patch, actor, info) {
   }
   await link.save();
   await audit({ user: actor, action: "PRODUCT_EDIT", entity: "PosProductLink", entityId: link.sku, before, after: patch, ...info });
+  // A new cost means a new cost code in the SKU (the old SKU stays an alias).
+  if (patch.costPrice !== undefined && patch.costPrice !== before.costPrice) {
+    await refreshSkuCodes(link.productId);
+    return PosProductLink.findById(link._id);
+  }
   return link;
 }
 

@@ -10,6 +10,7 @@ import { getSettings, storeSnapshot } from "../lib/settings.js";
 import { hasPermission } from "../lib/permissions.js";
 import { AppError, badRequest, forbidden, notFound } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
+import { findLinkBySku } from "./products.js";
 import { rateLimit } from "../lib/http.js";
 import { istDayRange } from "../lib/time.js";
 import { escapeRegex, normalizePhone } from "../lib/validate.js";
@@ -377,7 +378,7 @@ export async function performCancel(saleId, reason, actor, session, info = {}) {
   }
 
   for (const it of sale.items) {
-    const link = await PosProductLink.findOne({ sku: it.sku }).session(session).lean();
+    const link = await findLinkBySku(it.sku, session);
     await increaseStock({ productId: it.productId, variantKey: link ? link.variantKey : it.size, qty: it.qty, session });
   }
 

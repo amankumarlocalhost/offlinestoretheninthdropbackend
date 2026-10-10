@@ -4,7 +4,7 @@ import { Router } from "express";
 import { route, json, readJson, clientInfo, query } from "../lib/http.js";
 import { categorySettingSchema, linkUpdateSchema, stockAdjustSchema } from "../lib/schemas.js";
 import { OnlineCategory, OnlineProduct, PosCategorySetting, PosProductLink } from "../lib/models.js";
-import { listProducts, searchSellable, findBySku, updateLink, adjustLinkStock, syncProductLinks } from "../services/products.js";
+import { listProducts, searchSellable, findBySku, updateLink, adjustLinkStock, syncProductLinks, refreshSkuCodes } from "../services/products.js";
 import { audit } from "../lib/audit.js";
 import { badRequest } from "../lib/errors.js";
 import { getSettings } from "../lib/settings.js";
@@ -101,6 +101,19 @@ router.post(
       return json(result);
     },
     { permission: "products.edit" }
+  )
+);
+
+// Puts each size's cost code (cost × 2) into its SKU; old SKUs keep scanning.
+router.post(
+  "/product-links/cost-codes",
+  route(
+    async (req, { session }) => {
+      const result = await refreshSkuCodes();
+      await audit({ user: session.user, action: "SKU_COST_CODES", entity: "PosProductLink", after: result, ...clientInfo(req) });
+      return json(result);
+    },
+    { permission: ["products.viewCost"] }
   )
 );
 

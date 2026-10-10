@@ -8,7 +8,7 @@ import mongoose from "mongoose";
 import { OnlineProduct, OnlineCategory, PosCategorySetting, PosProductLink, PosSale, PosCounter } from "../lib/models.js";
 import { AppError, badRequest, notFound, conflict } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
-import { syncProductLinks } from "./products.js";
+import { syncProductLinks, refreshSkuCodes } from "./products.js";
 import { keyOf, variantMatch } from "../lib/stock.js";
 
 const LIVE_DBS = new Set(["thenine", ...String(process.env.LIVE_DB_NAME || "").split(",").map((s) => s.trim()).filter(Boolean)]);
@@ -257,8 +257,14 @@ export async function createProduct(input, actor, info) {
     tags: [],
     isActive: input.isActive,
   });
-  // Every size gets its SKU right away, ready for tags and billing.
-  await syncProductLinks();
+  // Every size gets its SKU right away (with its cost code), ready for tags and billing.
+  const costs = new Map();
+  if (variants.length) {
+    variants.forEach((v, i) => costs.set(`${product._id}:${v.key}`, input.variants[i].cost ?? input.costPrice ?? null));
+  } else {
+    costs.set(`${product._id}:`, input.costPrice ?? null);
+  }
+  await syncProductLinks({ costs });
   if (input.costPrice != null) await PosProductLink.updateMany({ productId: product._id }, { $set: { costPrice: input.costPrice } });
   // A row's own cost wins over the product cost.
   for (let i = 0; i < variants.length; i++) {
@@ -364,12 +370,16 @@ export async function updateProduct(id, patch, actor, info) {
   if (added.length) {
     // A size that existed before keeps its old SKU; otherwise a new one is made.
     await PosProductLink.updateMany({ productId: p._id, variantKey: { $in: added } }, { $set: { isActive: true } });
-    await syncProductLinks();
+    // New rows get their cost code in the SKU straight away.
+    const addedCosts = new Map(costs.filter(([key]) => added.includes(key)).map(([key, cost]) => [`${p._id}:${key}`, cost]));
+    await syncProductLinks({ costs: addedCosts });
     const cost = (await PosProductLink.findOne({ productId: p._id, costPrice: { $ne: null } }).lean())?.costPrice;
     if (cost != null) await PosProductLink.updateMany({ productId: p._id, variantKey: { $in: added }, costPrice: null }, { $set: { costPrice: cost } });
   }
   // Each row's cost lives on its SKU (used for profit in reports).
   for (const [key, cost] of costs) await PosProductLink.updateOne({ productId: p._id, variantKey: key }, { $set: { costPrice: cost ?? null } });
+  // Cost changes show in the SKU's cost code (old SKUs stay as aliases).
+  if (costs.length || added.length) await refreshSkuCodes(p._id);
 
   await audit({ user: actor, action: "PRODUCT_UPDATE", entity: "Product", entityId: p.productId, before: { name: p.name, price: p.price }, after: { ...set, addedSizes, removedSizes, sizePrices: repriced }, ...info });
   return getProduct(id);

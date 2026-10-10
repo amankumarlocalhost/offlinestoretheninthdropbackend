@@ -134,6 +134,9 @@ export const PosUser = model("PosUser", posUserSchema, "pos_users");
 const productLinkSchema = new Schema(
   {
     sku: { type: String, required: true, uppercase: true, trim: true },
+    // Earlier SKUs of this size (e.g. before its cost code changed). Tags
+    // printed with them still scan.
+    aliases: { type: [String], default: [] },
     productId: { type: ObjectId, required: true },
     // The variant row's key (its size on older rows; null = no sizes).
     variantKey: { type: String, default: null },
@@ -145,6 +148,7 @@ const productLinkSchema = new Schema(
   { timestamps: true }
 );
 productLinkSchema.index({ sku: 1 }, { unique: true });
+productLinkSchema.index({ aliases: 1 });
 productLinkSchema.index({ productId: 1, variantKey: 1 }, { unique: true });
 export const PosProductLink = model("PosProductLink", productLinkSchema, "pos_product_links");
 

@@ -7,6 +7,7 @@ import { getSettings } from "../lib/settings.js";
 import { hasPermission } from "../lib/permissions.js";
 import { AppError, badRequest, notFound, forbidden } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
+import { findLinkBySku } from "./products.js";
 
 const RETURNABLE = ["PAID", "PARTIALLY_RETURNED"];
 
@@ -26,7 +27,7 @@ export async function processReturn(returnId, actor, session, info = {}) {
     const item = sale.items[r.lineIndex];
     if (!item || item.qty - (item.returnedQty || 0) < r.qty) throw badRequest(`Cannot return more ${r.name} than were sold.`);
     item.returnedQty = (item.returnedQty || 0) + r.qty;
-    const link = await PosProductLink.findOne({ sku: item.sku }).session(session).lean();
+    const link = await findLinkBySku(item.sku, session);
     await increaseStock({ productId: item.productId, variantKey: link ? link.variantKey : item.size, qty: r.qty, session });
   }
 
