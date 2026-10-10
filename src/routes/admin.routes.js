@@ -2,7 +2,7 @@
 import { Router } from "express";
 import { route, json, readJson, clientInfo, query } from "../lib/http.js";
 import { expenseSchema } from "../lib/schemas.js";
-import { dashboard, dailyReport, monthlyReport } from "../services/reports.js";
+import { dashboard, dailyReport, monthlyReport, stockReport } from "../services/reports.js";
 import { createExpense, listExpenses } from "../services/expenses.js";
 import { PosAuditLog } from "../lib/models.js";
 import { istDayRange } from "../lib/time.js";
@@ -26,6 +26,12 @@ router.get(
     if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw badRequest("Use date=YYYY-MM-DD.");
     return json(await dailyReport(date));
   }, { permission: "reports.view" })
+);
+
+// Stock left right now: pieces and value per size, and the totals.
+router.get(
+  "/reports/stock",
+  route(async (_req, { session }) => json(await stockReport(session.permissions)), { permission: "reports.view" })
 );
 
 router.get(

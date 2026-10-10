@@ -10,7 +10,7 @@ import { audit } from "../lib/audit.js";
 // Rows a product can be sold in, by variant key (one size can have several rows,
 // e.g. M at 700 and M at 900). Sizes listed without their own variant row
 // share the product-level stock and use the size as key.
-function variantKeysOf(product) {
+export function variantKeysOf(product) {
   const keys = [];
   const sized = new Set();
   for (const v of product.variants || []) {
@@ -143,8 +143,20 @@ function shapeItem(link, product, permissions) {
   return item;
 }
 
+// Finds a SKU link. Tag barcodes hold the SKU without dashes ("TNDBW004428"
+// for TND-BW-0044-28), so a code without dashes matches with or without them.
+export async function findLinkBySku(sku, session = null) {
+  const code = String(sku).trim().toUpperCase();
+  let link = await PosProductLink.findOne({ sku: code }).session(session).lean();
+  if (!link && /^[A-Z0-9]{3,40}$/.test(code)) {
+    const rx = new RegExp(`^${code.split("").join("-?")}$`);
+    link = await PosProductLink.findOne({ sku: rx }).session(session).lean();
+  }
+  return link;
+}
+
 export async function findBySku(sku, permissions) {
-  const link = await PosProductLink.findOne({ sku: String(sku).trim().toUpperCase() }).lean();
+  const link = await findLinkBySku(sku);
   if (!link) throw notFound(`No product with SKU ${sku}.`);
   const product = await OnlineProduct.findById(link.productId).lean();
   if (!product) throw notFound(`Product for SKU ${sku} no longer exists.`);

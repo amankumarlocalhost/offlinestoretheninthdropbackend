@@ -1,8 +1,10 @@
-import { PosSale, PosReturn, PosExpense, OnlineProduct, OnlineOrder } from "../lib/models.js";
+import { PosSale, PosReturn, PosExpense, OnlineProduct, OnlineOrder, OnlineCategory, PosProductLink } from "../lib/models.js";
+import { availableQty, priceFor, keyOf } from "../lib/stock.js";
+import { hasPermission } from "../lib/permissions.js";
 import { istDayRange, istMonthRange, istDateKey, istHour } from "../lib/time.js";
 import { toPaise, toRupees } from "../lib/money.js";
 import { getSettings } from "../lib/settings.js";
-import { lowStock } from "./products.js";
+import { lowStock, variantKeysOf } from "./products.js";
 
 const COUNTED = { $nin: ["CANCELLED"] };
 
@@ -292,5 +294,93 @@ export async function monthlyReport(year, month) {
     topCustomers: [...custMap.values()].sort((a, b) => b.total - a.total).slice(0, 10),
     customers: { total: custIds.length, new: custIds.length - repeat, repeat, walkInBills: sales.filter((s) => !s.customer).length },
     staff: staffWise(sales),
+  };
+}
+
+/**
+ * Stock left right now: pieces and their value for every size of every active
+ * product, and the totals. Value at selling price (what the shop gets), at MRP,
+ * and at cost (cost only for users who may see it; sizes without a cost are
+ * counted separately so the cost total is never silently short).
+ */
+export async function stockReport(permissions) {
+  const showCost = hasPermission(permissions, "products.viewCost");
+  const [products, links, cats, settings] = await Promise.all([
+    OnlineProduct.find({ isActive: { $ne: false } }).select("name productId categories price originalPrice stock variants sizes").lean(),
+    PosProductLink.find().select("sku productId variantKey costPrice isActive").lean(),
+    OnlineCategory.find().select("slug label parent").lean(),
+    getSettings(),
+  ]);
+  const low = Number(settings.stock?.lowStockThreshold ?? 3);
+  const linkOf = new Map(links.map((l) => [`${l.productId}:${l.variantKey ?? ""}`, l]));
+  const catBySlug = new Map(cats.map((c) => [c.slug, c]));
+
+  const totals = { pieces: 0, valueP: 0, mrpValueP: 0, costValueP: 0, piecesWithoutCost: 0, sizes: 0, outOfStock: 0, lowStock: 0, products: 0 };
+  const items = [];
+  for (const p of products) {
+    const own = (p.categories || []).map((slug) => catBySlug.get(slug)).filter((c) => c && c.slug !== "new-arrivals");
+    const category = (own.find((c) => c.parent) || own[0])?.label || "";
+    const sizes = [];
+    const t = { pieces: 0, valueP: 0, mrpValueP: 0, costValueP: 0 };
+    for (const key of variantKeysOf(p)) {
+      const link = linkOf.get(`${p._id}:${key ?? ""}`);
+      const qty = availableQty(p, key);
+      const { price, mrp } = priceFor(p, key);
+      const cost = link?.costPrice ?? null;
+      const row = (p.variants || []).find((v) => keyOf(v) === key);
+      const valueP = toPaise(price) * qty;
+      const mrpValueP = toPaise(mrp) * qty;
+      const costValueP = cost != null ? toPaise(cost) * qty : 0;
+      sizes.push({
+        size: row?.size || key || "Free size",
+        sku: link?.sku || null,
+        stock: qty,
+        price,
+        mrp,
+        ...(showCost && { cost, costValue: cost != null ? toRupees(costValueP) : null }),
+        value: toRupees(valueP),
+        mrpValue: toRupees(mrpValueP),
+      });
+      t.pieces += qty;
+      t.valueP += valueP;
+      t.mrpValueP += mrpValueP;
+      t.costValueP += costValueP;
+      totals.sizes += 1;
+      if (qty <= 0) totals.outOfStock += 1;
+      else if (qty <= low) totals.lowStock += 1;
+      if (cost == null) totals.piecesWithoutCost += qty;
+    }
+    totals.pieces += t.pieces;
+    totals.valueP += t.valueP;
+    totals.mrpValueP += t.mrpValueP;
+    totals.costValueP += t.costValueP;
+    totals.products += 1;
+    items.push({
+      id: String(p._id),
+      name: p.name,
+      code: p.productId,
+      category,
+      pieces: t.pieces,
+      value: toRupees(t.valueP),
+      mrpValue: toRupees(t.mrpValueP),
+      ...(showCost && { costValue: toRupees(t.costValueP) }),
+      sizes,
+    });
+  }
+  items.sort((a, b) => b.value - a.value || a.name.localeCompare(b.name));
+  return {
+    at: new Date(),
+    lowStockThreshold: low,
+    totals: {
+      products: totals.products,
+      sizes: totals.sizes,
+      pieces: totals.pieces,
+      value: toRupees(totals.valueP),
+      mrpValue: toRupees(totals.mrpValueP),
+      ...(showCost && { costValue: toRupees(totals.costValueP), piecesWithoutCost: totals.piecesWithoutCost }),
+      outOfStock: totals.outOfStock,
+      lowStock: totals.lowStock,
+    },
+    items,
   };
 }
