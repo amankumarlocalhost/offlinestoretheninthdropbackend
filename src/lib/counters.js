@@ -24,12 +24,6 @@ export async function nextReturnNo(session) {
   return `TND-RT-${ym}-${String(seq).padStart(4, "0")}`;
 }
 
-// 8-digit tag barcode numbers from 10000001: an even count of digits is the
-// shortest CODE128 barcode.
-export async function nextTagBarcode() {
-  return String(10000000 + (await next("tag-barcode", null)));
-}
-
 export async function nextProductNo() {
   return next("sku-product-no", null);
 }

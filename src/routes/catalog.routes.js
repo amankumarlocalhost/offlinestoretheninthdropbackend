@@ -8,7 +8,6 @@ import { listProducts, searchSellable, findBySku, updateLink, adjustLinkStock, s
 import { audit } from "../lib/audit.js";
 import { badRequest } from "../lib/errors.js";
 import { getSettings } from "../lib/settings.js";
-import { nextTagBarcode } from "../lib/counters.js";
 
 const router = Router();
 
@@ -154,18 +153,8 @@ router.get(
       const ids = [...new Set(groups.filter((g) => g.productId).map((g) => g.productId))];
       const products = await OnlineProduct.find({ _id: { $in: ids } }).select("productId categories fabric showMrpCut variants").lean();
       // Which size row each SKU is, for that row's own edition.
-      const linkRows = await PosProductLink.find({ sku: { $in: groups.map((g) => g.sku) } }).select("sku variantKey barcode").lean();
+      const linkRows = await PosProductLink.find({ sku: { $in: groups.map((g) => g.sku) } }).select("sku variantKey").lean();
       const rowOfSku = new Map(linkRows.map((l) => [l.sku, l.variantKey]));
-      // The short number the barcode holds; a size printed for the first time gets one.
-      const numberOfSku = new Map();
-      for (const l of linkRows) {
-        if (!l.barcode) {
-          const fresh = await nextTagBarcode();
-          await PosProductLink.updateOne({ _id: l._id, barcode: { $exists: false } }, { $set: { barcode: fresh } });
-          l.barcode = (await PosProductLink.findById(l._id).select("barcode").lean())?.barcode;
-        }
-        numberOfSku.set(l.sku, l.barcode);
-      }
       const cats = await OnlineCategory.find({ slug: { $in: products.flatMap((p) => p.categories || []) } }).select("slug label parent").lean();
       const catBySlug = new Map(cats.map((c) => [c.slug, c]));
       const catById = new Map(cats.map((c) => [String(c._id), c]));
@@ -176,7 +165,6 @@ router.get(
         if (!p) continue;
         const own = (p.categories || []).map((slug) => catBySlug.get(slug)).filter((c) => c && c.slug !== "new-arrivals");
         g.code = p.productId || "";
-        g.barcode = numberOfSku.get(g.sku) || "";
         const row = (p.variants || []).find((v) => (v.key || v.size) === rowOfSku.get(g.sku));
         g.fabric = row?.edition || p.fabric || "";
         // This size row's own MRP-cut choice wins; otherwise the product's.

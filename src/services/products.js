@@ -162,14 +162,9 @@ function shapeItem(link, product, permissions) {
 // Finds a SKU link. Tag barcodes hold the SKU without dashes ("TNDBW004428"
 // for TND-BW-0044-28), so a code without dashes matches with or without them.
 // Older SKUs of a size (before a cost-code change) are kept as aliases, so
-// tags printed with them still scan. Newer tags hold the size's short
-// barcode number instead ("10000042").
+// tags printed with them still scan.
 export async function findLinkBySku(sku, session = null) {
   const code = String(sku).trim().toUpperCase();
-  if (/^\d{8}$/.test(code)) {
-    const byNumber = await PosProductLink.findOne({ barcode: code }).session(session).lean();
-    if (byNumber) return byNumber;
-  }
   let link =
     (await PosProductLink.findOne({ sku: code }).session(session).lean()) ||
     (await PosProductLink.findOne({ aliases: code }).session(session).lean());

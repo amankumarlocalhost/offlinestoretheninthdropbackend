@@ -137,9 +137,6 @@ const productLinkSchema = new Schema(
     // Earlier SKUs of this size (e.g. before its cost code changed). Tags
     // printed with them still scan.
     aliases: { type: [String], default: [] },
-    // Short number printed in the tag barcode (e.g. "10000042"): far fewer bars
-    // than the SKU, so they print wide and scan easily. Given out on first print.
-    barcode: { type: String },
     productId: { type: ObjectId, required: true },
     // The variant row's key (its size on older rows; null = no sizes).
     variantKey: { type: String, default: null },
@@ -152,7 +149,6 @@ const productLinkSchema = new Schema(
 );
 productLinkSchema.index({ sku: 1 }, { unique: true });
 productLinkSchema.index({ aliases: 1 });
-productLinkSchema.index({ barcode: 1 }, { unique: true, sparse: true });
 productLinkSchema.index({ productId: 1, variantKey: 1 }, { unique: true });
 export const PosProductLink = model("PosProductLink", productLinkSchema, "pos_product_links");
 
