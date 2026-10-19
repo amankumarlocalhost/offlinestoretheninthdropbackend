@@ -21,11 +21,11 @@ function sign(params, apiSecret) {
   return crypto.createHash("sha1").update(parts.join("&") + apiSecret).digest("hex");
 }
 
-export async function uploadImage(buffer, mime, { subfolder = "logo" } = {}) {
+export async function uploadImage(buffer, mime, { subfolder = "logo", resourceType = "image", filename } = {}) {
   const { cloudName, apiKey, apiSecret, folder } = config();
   const params = { folder: `${folder}/${subfolder}`, timestamp: Math.floor(Date.now() / 1000) };
   const form = new FormData();
-  form.append("file", new Blob([buffer], { type: mime }));
+  form.append("file", new Blob([buffer], { type: mime }), filename);
   form.append("api_key", apiKey);
   form.append("timestamp", String(params.timestamp));
   form.append("folder", params.folder);
@@ -33,7 +33,7 @@ export async function uploadImage(buffer, mime, { subfolder = "logo" } = {}) {
 
   let res;
   try {
-    res = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, { method: "POST", body: form });
+    res = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/${resourceType}/upload`, { method: "POST", body: form });
   } catch {
     throw new AppError("Could not reach Cloudinary. Check the internet connection and try again.", "UPLOAD_FAILED", 502);
   }
@@ -55,4 +55,12 @@ export async function destroyImage(publicId) {
   form.append("signature", sign(params, apiSecret));
   const res = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/destroy`, { method: "POST", body: form });
   return res.json().catch(() => ({}));
+}
+
+// A purchase document. PDFs go up as "raw" files: Cloudinary blocks delivery
+// of PDFs stored as images on many accounts, raw files always open.
+export function uploadDocument(buffer, mime, filename) {
+  const resourceType = mime === "application/pdf" ? "raw" : "image";
+  const name = String(filename || "file").replace(/[^\w.-]+/g, "_").slice(-80);
+  return uploadImage(buffer, mime, { subfolder: "purchases", resourceType, filename: name });
 }

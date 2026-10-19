@@ -152,6 +152,34 @@ productLinkSchema.index({ aliases: 1 });
 productLinkSchema.index({ productId: 1, variantKey: 1 }, { unique: true });
 export const PosProductLink = model("PosProductLink", productLinkSchema, "pos_product_links");
 
+// Where a product was bought: vendor, invoice and up to two files (the
+// vendor's bill / invoice). One row per product, kept on the POS side so the
+// website's product record is never touched.
+const purchaseFileSchema = new Schema(
+  {
+    kind: { type: String, enum: ["INVOICE", "VENDOR"], required: true },
+    url: { type: String, required: true },
+    name: { type: String, default: "" },
+    mime: { type: String, default: "" },
+  },
+  { _id: false }
+);
+const productPurchaseSchema = new Schema(
+  {
+    productId: { type: ObjectId, required: true },
+    vendorName: { type: String, trim: true, default: "" },
+    vendorPhone: { type: String, trim: true, default: "" },
+    invoiceNo: { type: String, trim: true, default: "" },
+    purchaseDate: { type: Date, default: null },
+    note: { type: String, default: "" },
+    files: { type: [purchaseFileSchema], default: [] },
+  },
+  { timestamps: true }
+);
+productPurchaseSchema.index({ productId: 1 }, { unique: true });
+productPurchaseSchema.index({ vendorName: 1 });
+export const PosProductPurchase = model("PosProductPurchase", productPurchaseSchema, "pos_product_purchases");
+
 const categorySettingSchema = new Schema(
   {
     categorySlug: { type: String, required: true },
@@ -193,6 +221,7 @@ const saleItemSchema = new Schema(
     qty: Number,
     mrp: Number, // per unit
     price: Number, // per unit selling price at sale time
+    cost: { type: Number, default: null }, // per unit cost price at sale time (for profit)
     lineGross: Number, // price × qty
     discount: Number, // share of the bill discount
     lineTotal: Number, // what the customer pays for this line

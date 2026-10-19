@@ -108,9 +108,63 @@ async function categoryWise(sales) {
   return [...map.entries()].map(([category, total]) => ({ category, total })).sort((a, b) => b.total - a.total);
 }
 
+// Current cost of each SKU (also by its old aliases), for bills made before
+// the cost was saved on the bill line.
+async function costBySku(sales) {
+  const skus = new Set();
+  for (const s of sales) for (const it of s.items) if (it.cost == null) skus.add(it.sku);
+  if (!skus.size) return new Map();
+  const list = [...skus];
+  const links = await PosProductLink.find({ $or: [{ sku: { $in: list } }, { aliases: { $in: list } }] })
+    .select("sku aliases costPrice")
+    .lean();
+  const map = new Map();
+  for (const l of links) {
+    if (l.costPrice == null) continue;
+    map.set(l.sku, l.costPrice);
+    for (const a of l.aliases || []) if (!map.has(a)) map.set(a, l.costPrice);
+  }
+  return map;
+}
+
+/**
+ * Profit on the pieces that were sold and not returned: what the customer paid
+ * for the line (after discount) minus its cost price. Lines without a cost are
+ * left out of the profit and counted, so the number is never silently high.
+ */
+function profitOf(sales, fallbackCost) {
+  let revenueP = 0;
+  let costP = 0;
+  let piecesWithoutCost = 0;
+  let salesWithoutCostP = 0;
+  for (const s of sales) {
+    for (const it of s.items) {
+      const net = it.qty - (it.returnedQty || 0);
+      if (net <= 0 || !it.qty) continue;
+      const lineP = Math.round((toPaise(it.lineTotal) * net) / it.qty);
+      const cost = it.cost ?? fallbackCost.get(it.sku) ?? null;
+      if (cost == null) {
+        piecesWithoutCost += net;
+        salesWithoutCostP += lineP;
+        continue;
+      }
+      revenueP += lineP;
+      costP += toPaise(cost) * net;
+    }
+  }
+  return {
+    revenue: toRupees(revenueP),
+    cost: toRupees(costP),
+    profit: toRupees(revenueP - costP),
+    marginPercent: revenueP > 0 ? Math.round(((revenueP - costP) / revenueP) * 1000) / 10 : 0,
+    piecesWithoutCost,
+    salesWithoutCost: toRupees(salesWithoutCostP),
+  };
+}
+
 const saleFields = "billNo createdAt customer customerSnapshot items payments grandTotal discount status soldByName";
 
-export async function dashboard(year, month) {
+export async function dashboard(year, month, permissions) {
   const range = istMonthRange(year, month);
   const today = istDayRange();
   const settings = await getSettings();
@@ -143,6 +197,16 @@ export async function dashboard(year, month) {
     days.push({ day: d, date: key, total: byDay.get(key) || 0 });
   }
 
+  // Profit (sale price − cost) only for users who may see cost prices.
+  let profit = null;
+  if (hasPermission(permissions, "products.viewCost")) {
+    const fallback = await costBySku([...sales, ...todaySales]);
+    const m = profitOf(sales, fallback);
+    const t = profitOf(todaySales, fallback);
+    // Net profit: profit on goods sold minus the shop's expenses this month.
+    profit = { month: { ...m, expenses: exp.total, netProfit: toRupees(toPaise(m.profit) - toPaise(exp.total)) }, today: t };
+  }
+
   let onlineP = 0;
   for (const o of onlineOrders) onlineP += toPaise(o.total);
   const todaySum = summarize(todaySales);
@@ -170,6 +234,7 @@ export async function dashboard(year, month) {
       topProducts: topProducts(sales, 10),
     },
     online: { orders: onlineOrders.length, total: toRupees(onlineP) },
+    profit,
   };
 }
 

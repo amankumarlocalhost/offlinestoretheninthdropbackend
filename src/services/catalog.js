@@ -5,7 +5,7 @@
 // changed from the store. Only the store's own catalog database (e.g. the
 // demo) is editable.
 import mongoose from "mongoose";
-import { OnlineProduct, OnlineCategory, PosCategorySetting, PosProductLink, PosSale, PosCounter } from "../lib/models.js";
+import { OnlineProduct, OnlineCategory, PosCategorySetting, PosProductLink, PosSale, PosCounter, PosProductPurchase } from "../lib/models.js";
 import { AppError, badRequest, notFound, conflict } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
 import { syncProductLinks, refreshSkuCodes } from "./products.js";
@@ -192,10 +192,46 @@ function cleanPrices(price, originalPrice) {
   return { price, originalPrice: originalPrice && originalPrice > price ? originalPrice : null };
 }
 
+/* ── Purchase details (vendor, invoice, files) ─────────────────────────────── */
+
+function shapePurchase(row) {
+  return {
+    vendorName: row?.vendorName || "",
+    vendorPhone: row?.vendorPhone || "",
+    invoiceNo: row?.invoiceNo || "",
+    purchaseDate: row?.purchaseDate ? row.purchaseDate.toISOString().slice(0, 10) : "",
+    note: row?.note || "",
+    files: (row?.files || []).map((f) => ({ kind: f.kind, url: f.url, name: f.name || "", mime: f.mime || "" })),
+  };
+}
+
+// One row per product; saving replaces it. Returns the saved shape.
+async function savePurchase(productId, input) {
+  const row = await PosProductPurchase.findOneAndUpdate(
+    { productId },
+    {
+      $set: {
+        vendorName: input.vendorName,
+        vendorPhone: input.vendorPhone,
+        invoiceNo: input.invoiceNo,
+        purchaseDate: input.purchaseDate ? new Date(`${input.purchaseDate}T00:00:00+05:30`) : null,
+        note: input.note,
+        files: input.files,
+      },
+    },
+    { upsert: true, new: true }
+  ).lean();
+  return shapePurchase(row);
+}
+
 export async function getProduct(id) {
   const p = await OnlineProduct.findById(id).lean();
   if (!p) throw notFound("Product not found.");
-  const [cats, links] = await Promise.all([OnlineCategory.find({ slug: { $in: p.categories || [] } }).lean(), PosProductLink.find({ productId: p._id }).lean()]);
+  const [cats, links, purchase] = await Promise.all([
+    OnlineCategory.find({ slug: { $in: p.categories || [] } }).lean(),
+    PosProductLink.find({ productId: p._id }).lean(),
+    PosProductPurchase.findOne({ productId: p._id }).lean(),
+  ]);
   // The chosen category is the most specific one: a sub-category if there is one.
   const own = cats.filter((c) => c.slug !== NEW_ARRIVALS);
   const chosen = own.find((c) => c.parent) || own[0];
@@ -229,6 +265,7 @@ export async function getProduct(id) {
     })),
     stock: p.stock ?? 0,
     oneSizeSku: (p.variants || []).length ? null : skuOf.get("") || null,
+    purchase: shapePurchase(purchase),
   };
 }
 
@@ -271,7 +308,15 @@ export async function createProduct(input, actor, info) {
     const cost = input.variants[i].cost;
     if (cost != null) await PosProductLink.updateOne({ productId: product._id, variantKey: variants[i].key }, { $set: { costPrice: cost } });
   }
-  await audit({ user: actor, action: "PRODUCT_CREATE", entity: "Product", entityId: product.productId, after: { name: product.name, price: product.price, sizes: product.sizes, stock }, ...info });
+  if (input.purchase) await savePurchase(product._id, input.purchase);
+  await audit({
+    user: actor,
+    action: "PRODUCT_CREATE",
+    entity: "Product",
+    entityId: product.productId,
+    after: { name: product.name, price: product.price, sizes: product.sizes, stock, vendor: input.purchase?.vendorName || "", invoiceNo: input.purchase?.invoiceNo || "" },
+    ...info,
+  });
   return getProduct(product._id);
 }
 
@@ -381,7 +426,22 @@ export async function updateProduct(id, patch, actor, info) {
   // Cost changes show in the SKU's cost code (old SKUs stay as aliases).
   if (costs.length || added.length) await refreshSkuCodes(p._id);
 
-  await audit({ user: actor, action: "PRODUCT_UPDATE", entity: "Product", entityId: p.productId, before: { name: p.name, price: p.price }, after: { ...set, addedSizes, removedSizes, sizePrices: repriced }, ...info });
+  let purchaseChange = null;
+  if (patch.purchase) {
+    const before = shapePurchase(await PosProductPurchase.findOne({ productId: p._id }).lean());
+    const after = await savePurchase(p._id, patch.purchase);
+    if (JSON.stringify(before) !== JSON.stringify(after)) purchaseChange = { vendor: after.vendorName, invoiceNo: after.invoiceNo, files: after.files.length };
+  }
+
+  await audit({
+    user: actor,
+    action: "PRODUCT_UPDATE",
+    entity: "Product",
+    entityId: p.productId,
+    before: { name: p.name, price: p.price },
+    after: { ...set, addedSizes, removedSizes, sizePrices: repriced, ...(purchaseChange && { purchase: purchaseChange }) },
+    ...info,
+  });
   return getProduct(id);
 }
 
@@ -402,6 +462,7 @@ export async function deleteProduct(id, actor, info) {
   }
   await OnlineProduct.deleteOne({ _id: p._id });
   await PosProductLink.deleteMany({ productId: p._id });
+  await PosProductPurchase.deleteOne({ productId: p._id });
   await audit({ user: actor, action: "PRODUCT_DELETE", entity: "Product", entityId: p.productId, before: { name: p.name, sizes: p.sizes }, ...info });
   return { deleted: true };
 }

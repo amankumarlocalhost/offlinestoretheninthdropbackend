@@ -122,6 +122,7 @@ export async function createSale(input, { user, permissions }, info) {
         qty: w.qty,
         mrp,
         price,
+        cost: link.costPrice ?? null,
         isSaleItem,
       });
     }
@@ -253,7 +254,8 @@ export function shapeSale(sale, permissions) {
     createdAt: s.createdAt,
     customer: s.customer ? String(s.customer) : null,
     customerSnapshot: s.customerSnapshot,
-    items: s.items,
+    // Cost price stays on the server unless the user may see costs.
+    items: hasPermission(permissions, "products.viewCost") ? s.items : s.items.map(({ cost, ...rest }) => rest),
     mrpTotal: s.mrpTotal,
     subTotal: s.subTotal,
     discount: s.discount,

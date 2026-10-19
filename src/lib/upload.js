@@ -32,3 +32,27 @@ export function readImageUpload(req, res) {
     });
   });
 }
+
+export const MAX_DOC_BYTES = 10 * 1024 * 1024; // 10 MB
+const DOC_SIGNATURES = { ...SIGNATURES, "application/pdf": [0x25, 0x50, 0x44, 0x46] }; // %PDF
+const docUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_DOC_BYTES, files: 1 } }).single("file");
+
+/**
+ * Reads one purchase document (multipart field "file"): a PDF or a PNG / JPG /
+ * WEBP photo of the vendor's bill or invoice, up to 10 MB.
+ */
+export function readDocumentUpload(req, res) {
+  return new Promise((resolve, reject) => {
+    docUpload(req, res, (err) => {
+      if (err) return reject(badRequest(err.code === "LIMIT_FILE_SIZE" ? "File must be 10 MB or smaller." : "Choose a file."));
+      const file = req.file;
+      if (!file) return reject(badRequest("Choose a file."));
+      const sig = DOC_SIGNATURES[file.mimetype];
+      if (!sig) return reject(badRequest("Upload a PDF, PNG, JPG or WEBP file."));
+      for (let i = 0; i < sig.length; i++) {
+        if (file.buffer[i] !== sig[i]) return reject(badRequest("That file is not what its name says."));
+      }
+      resolve(file);
+    });
+  });
+}

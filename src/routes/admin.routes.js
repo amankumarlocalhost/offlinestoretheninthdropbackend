@@ -13,9 +13,9 @@ const router = Router();
 // Never resets data: it simply shows the chosen IST month (current by default).
 router.get(
   "/dashboard",
-  route(async (req) => {
+  route(async (req, { session }) => {
     const q = query(req);
-    return json(await dashboard(q.year, q.month));
+    return json(await dashboard(q.year, q.month, session.permissions));
   }, { permission: "dashboard.view" })
 );
 

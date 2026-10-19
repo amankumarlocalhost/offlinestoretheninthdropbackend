@@ -254,6 +254,23 @@ const rowExtras = {
   mrpCut: z.boolean().nullable().optional(),
 };
 
+// Where the product was bought: vendor, invoice and up to two files
+// (vendor's bill and the invoice), uploaded first to /catalog/purchase-files.
+const purchaseFile = z.object({
+  kind: z.enum(["INVOICE", "VENDOR"]),
+  url: z.string().trim().url().max(500).refine((v) => v.startsWith("https://"), "File link must start with https://"),
+  name: z.string().trim().max(120).optional().default(""),
+  mime: z.string().trim().max(60).optional().default(""),
+});
+const purchaseSchema = z.object({
+  vendorName: z.string().trim().max(80).optional().default(""),
+  vendorPhone: z.string().trim().max(20).optional().default(""),
+  invoiceNo: z.string().trim().max(40).optional().default(""),
+  purchaseDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, "Purchase date: YYYY-MM-DD").or(z.literal("")).nullable().optional().default(null),
+  note: z.string().trim().max(500).optional().default(""),
+  files: z.array(purchaseFile).max(2).optional().default([]),
+});
+
 export const productCreateSchema = z.object({
   ...productFields,
   description: productFields.description.optional().default(""),
@@ -274,6 +291,7 @@ export const productCreateSchema = z.object({
     .default([]),
   oneSizeStock: z.coerce.number().int().min(0).max(100000).optional().default(0),
   costPrice: money.nullable().optional(),
+  purchase: purchaseSchema.optional(),
 });
 
 // Stock of sizes that already exist is changed with the Stock button (audited),
@@ -285,5 +303,6 @@ export const productUpdateSchema = z
       .array(z.object({ key: variantKey.optional(), size, stock: z.coerce.number().int().min(0).max(100000).optional().default(0), price: money.nullable().optional(), ...rowExtras }))
       .max(40)
       .refine(uniqueKeys, "Each size row only once"),
+    purchase: purchaseSchema,
   })
   .partial();

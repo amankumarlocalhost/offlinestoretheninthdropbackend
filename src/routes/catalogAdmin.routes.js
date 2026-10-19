@@ -5,8 +5,8 @@ import { Router } from "express";
 import { route, json, readJson, clientInfo } from "../lib/http.js";
 import { categoryCreateSchema, categoryUpdateSchema, productCreateSchema, productUpdateSchema } from "../lib/schemas.js";
 import { catalogInfo, categoryTree, createCategory, updateCategory, deleteCategory, getProduct, createProduct, updateProduct, deleteProduct } from "../services/catalog.js";
-import { readImageUpload } from "../lib/upload.js";
-import { uploadImage } from "../lib/cloudinary.js";
+import { readImageUpload, readDocumentUpload } from "../lib/upload.js";
+import { uploadImage, uploadDocument } from "../lib/cloudinary.js";
 
 const router = Router();
 const manage = { permission: "catalog.manage" };
@@ -55,6 +55,17 @@ router.post(
     const file = await readImageUpload(req, res);
     const uploaded = await uploadImage(file.buffer, file.mimetype, { subfolder: "products" });
     return json({ url: uploaded.url }, 201);
+  }, manage)
+);
+
+// Vendor bill / invoice (PDF or photo) → Cloudinary. Returns its link for the
+// product form, which saves it with the product's purchase details.
+router.post(
+  "/purchase-files",
+  route(async (req, { res }) => {
+    const file = await readDocumentUpload(req, res);
+    const uploaded = await uploadDocument(file.buffer, file.mimetype, file.originalname);
+    return json({ url: uploaded.url, name: file.originalname, mime: file.mimetype }, 201);
   }, manage)
 );
 
