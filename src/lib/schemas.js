@@ -246,14 +246,6 @@ const uniqueKeys = (list) => {
   return new Set(keys).size === keys.length;
 };
 
-// A size row's own MRP, cost price and edition (all optional).
-const rowExtras = {
-  mrp: money.nullable().optional(),
-  cost: money.nullable().optional(),
-  edition: z.string().trim().max(40).optional(),
-  mrpCut: z.boolean().nullable().optional(),
-};
-
 // Where the product was bought: vendor, invoice and up to two files
 // (vendor's bill and the invoice), uploaded first to /catalog/purchase-files.
 const purchaseFile = z.object({
@@ -270,6 +262,15 @@ const purchaseSchema = z.object({
   note: z.string().trim().max(500).optional().default(""),
   files: z.array(purchaseFile).max(2).optional().default([]),
 });
+
+// A size row's own MRP, cost price, edition and purchase details (all optional).
+const rowExtras = {
+  purchase: purchaseSchema.optional(),
+  mrp: money.nullable().optional(),
+  cost: money.nullable().optional(),
+  edition: z.string().trim().max(40).optional(),
+  mrpCut: z.boolean().nullable().optional(),
+};
 
 export const productCreateSchema = z.object({
   ...productFields,

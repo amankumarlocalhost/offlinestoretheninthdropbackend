@@ -154,7 +154,9 @@ export const PosProductLink = model("PosProductLink", productLinkSchema, "pos_pr
 
 // Where a product was bought: vendor, invoice and up to two files (the
 // vendor's bill / invoice). One row per product, kept on the POS side so the
-// website's product record is never touched.
+// website's product record is never touched. The top-level fields are for a
+// free-size product; `sizes` holds each size row's own details (by row key),
+// since different sizes can come from different vendors.
 const purchaseFileSchema = new Schema(
   {
     kind: { type: String, enum: ["INVOICE", "VENDOR"], required: true },
@@ -164,20 +166,26 @@ const purchaseFileSchema = new Schema(
   },
   { _id: false }
 );
+const purchaseFields = {
+  vendorName: { type: String, trim: true, default: "" },
+  vendorPhone: { type: String, trim: true, default: "" },
+  invoiceNo: { type: String, trim: true, default: "" },
+  purchaseDate: { type: Date, default: null },
+  note: { type: String, default: "" },
+  files: { type: [purchaseFileSchema], default: [] },
+};
+const sizePurchaseSchema = new Schema({ key: { type: String, required: true }, ...purchaseFields }, { _id: false });
 const productPurchaseSchema = new Schema(
   {
     productId: { type: ObjectId, required: true },
-    vendorName: { type: String, trim: true, default: "" },
-    vendorPhone: { type: String, trim: true, default: "" },
-    invoiceNo: { type: String, trim: true, default: "" },
-    purchaseDate: { type: Date, default: null },
-    note: { type: String, default: "" },
-    files: { type: [purchaseFileSchema], default: [] },
+    ...purchaseFields,
+    sizes: { type: [sizePurchaseSchema], default: [] },
   },
   { timestamps: true }
 );
 productPurchaseSchema.index({ productId: 1 }, { unique: true });
 productPurchaseSchema.index({ vendorName: 1 });
+productPurchaseSchema.index({ "sizes.vendorName": 1 });
 export const PosProductPurchase = model("PosProductPurchase", productPurchaseSchema, "pos_product_purchases");
 
 const categorySettingSchema = new Schema(

@@ -194,6 +194,9 @@ function cleanPrices(price, originalPrice) {
 
 /* ── Purchase details (vendor, invoice, files) ─────────────────────────────── */
 
+const NO_PURCHASE = { vendorName: "", vendorPhone: "", invoiceNo: "", purchaseDate: "", note: "", files: [] };
+const hasPurchase = (p) => Boolean(p && (p.vendorName || p.vendorPhone || p.invoiceNo || p.purchaseDate || p.note || p.files?.length));
+
 function shapePurchase(row) {
   return {
     vendorName: row?.vendorName || "",
@@ -205,23 +208,36 @@ function shapePurchase(row) {
   };
 }
 
-// One row per product; saving replaces it. Returns the saved shape.
-async function savePurchase(productId, input) {
-  const row = await PosProductPurchase.findOneAndUpdate(
-    { productId },
-    {
-      $set: {
-        vendorName: input.vendorName,
-        vendorPhone: input.vendorPhone,
-        invoiceNo: input.invoiceNo,
-        purchaseDate: input.purchaseDate ? new Date(`${input.purchaseDate}T00:00:00+05:30`) : null,
-        note: input.note,
-        files: input.files,
-      },
-    },
-    { upsert: true, new: true }
-  ).lean();
-  return shapePurchase(row);
+function purchaseDoc(input) {
+  return {
+    vendorName: input.vendorName,
+    vendorPhone: input.vendorPhone,
+    invoiceNo: input.invoiceNo,
+    purchaseDate: input.purchaseDate ? new Date(`${input.purchaseDate}T00:00:00+05:30`) : null,
+    note: input.note,
+    files: input.files,
+  };
+}
+
+/**
+ * One row per product. `product` replaces the product-level details (free
+ * size); `sizes` ([row key, details] pairs) replaces every size row's details,
+ * keeping only rows that have something filled in. Either may be left out.
+ */
+async function savePurchase(productId, { product, sizes } = {}) {
+  const set = {};
+  if (product) Object.assign(set, purchaseDoc(product));
+  if (sizes) set.sizes = sizes.filter(([, p]) => hasPurchase(p)).map(([key, p]) => ({ key, ...purchaseDoc(p) }));
+  if (!Object.keys(set).length) return;
+  await PosProductPurchase.updateOne({ productId }, { $set: set }, { upsert: true });
+}
+
+// A short summary of the vendor details, for the audit log.
+function purchaseSummary(row) {
+  const out = {};
+  if (hasPurchase(row)) out.product = `${row.vendorName || "?"} / ${row.invoiceNo || "-"} / ${row.files?.length || 0} file(s)`;
+  for (const s of row?.sizes || []) out[s.key] = `${s.vendorName || "?"} / ${s.invoiceNo || "-"} / ${s.files?.length || 0} file(s)`;
+  return out;
 }
 
 export async function getProduct(id) {
@@ -236,6 +252,7 @@ export async function getProduct(id) {
   const own = cats.filter((c) => c.slug !== NEW_ARRIVALS);
   const chosen = own.find((c) => c.parent) || own[0];
   const skuOf = new Map(links.map((l) => [l.variantKey ?? "", l.sku]));
+  const purchaseOf = new Map((purchase?.sizes || []).map((s) => [s.key, s]));
   const costOf = new Map(links.map((l) => [l.variantKey ?? "", l.costPrice ?? null]));
   return {
     id: String(p._id),
@@ -261,6 +278,7 @@ export async function getProduct(id) {
       edition: v.edition || "",
       mrpCut: typeof v.mrpCut === "boolean" ? v.mrpCut : null,
       cost: costOf.get(keyOf(v)) ?? null,
+      purchase: purchaseOf.has(keyOf(v)) ? shapePurchase(purchaseOf.get(keyOf(v))) : { ...NO_PURCHASE },
       sku: skuOf.get(keyOf(v)) || null,
     })),
     stock: p.stock ?? 0,
@@ -308,13 +326,15 @@ export async function createProduct(input, actor, info) {
     const cost = input.variants[i].cost;
     if (cost != null) await PosProductLink.updateOne({ productId: product._id, variantKey: variants[i].key }, { $set: { costPrice: cost } });
   }
-  if (input.purchase) await savePurchase(product._id, input.purchase);
+  // Vendor / invoice: the product's own (free size) and each size row's.
+  await savePurchase(product._id, { product: input.purchase, sizes: variants.map((v, i) => [v.key, input.variants[i].purchase]) });
+  const saved = await PosProductPurchase.findOne({ productId: product._id }).lean();
   await audit({
     user: actor,
     action: "PRODUCT_CREATE",
     entity: "Product",
     entityId: product.productId,
-    after: { name: product.name, price: product.price, sizes: product.sizes, stock, vendor: input.purchase?.vendorName || "", invoiceNo: input.purchase?.invoiceNo || "" },
+    after: { name: product.name, price: product.price, sizes: product.sizes, stock, purchase: purchaseSummary(saved) },
     ...info,
   });
   return getProduct(product._id);
@@ -352,6 +372,7 @@ export async function updateProduct(id, patch, actor, info) {
   const removedSizes = [];
   const repriced = [];
   const costs = []; // [row key, cost] to save on that row's SKU
+  const rowPurchases = []; // [row key, purchase details] of every row sent
   if (patch.variants) {
     const have = new Map((p.variants || []).map((v) => [keyOf(v), v]));
     const keep = patch.variants.filter((v) => v.key && have.has(v.key));
@@ -375,6 +396,7 @@ export async function updateProduct(id, patch, actor, info) {
       await OnlineProduct.updateOne({ _id: p._id }, { $push: { variants: { key, size: v.size, color, sku: "", stock: v.stock, ...rowFields(v) } }, $inc: { stock: v.stock } });
       added.push(key);
       if (v.cost != null) costs.push([key, v.cost]);
+      rowPurchases.push([key, v.purchase]);
       addedSizes.push(v.size);
     }
     for (const v of keep) {
@@ -393,6 +415,7 @@ export async function updateProduct(id, patch, actor, info) {
         repriced.push(`${old.size}: ${Object.keys(rowSet).map((k) => k.split(".").pop()).join(", ")}`);
       }
       if (v.cost !== undefined) costs.push([v.key, v.cost]);
+      rowPurchases.push([v.key, v.purchase]);
     }
     // The size list follows the rows: each size once.
     if (added.length || removed.length) {
@@ -426,11 +449,16 @@ export async function updateProduct(id, patch, actor, info) {
   // Cost changes show in the SKU's cost code (old SKUs stay as aliases).
   if (costs.length || added.length) await refreshSkuCodes(p._id);
 
+  // Vendor / invoice. A size row sent without details keeps the ones it had.
   let purchaseChange = null;
-  if (patch.purchase) {
-    const before = shapePurchase(await PosProductPurchase.findOne({ productId: p._id }).lean());
-    const after = await savePurchase(p._id, patch.purchase);
-    if (JSON.stringify(before) !== JSON.stringify(after)) purchaseChange = { vendor: after.vendorName, invoiceNo: after.invoiceNo, files: after.files.length };
+  if (patch.purchase || patch.variants) {
+    const old = await PosProductPurchase.findOne({ productId: p._id }).lean();
+    const oldOf = new Map((old?.sizes || []).map((s) => [s.key, shapePurchase(s)]));
+    const sizes = patch.variants ? rowPurchases.map(([key, pur]) => [key, pur ?? oldOf.get(key)]) : undefined;
+    await savePurchase(p._id, { product: patch.purchase, sizes });
+    const before = purchaseSummary(old);
+    const after = purchaseSummary(await PosProductPurchase.findOne({ productId: p._id }).lean());
+    if (JSON.stringify(before) !== JSON.stringify(after)) purchaseChange = { before, after };
   }
 
   await audit({
