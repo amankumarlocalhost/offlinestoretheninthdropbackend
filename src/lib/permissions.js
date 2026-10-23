@@ -23,6 +23,11 @@ export const ALL_PERMISSIONS = [
   "sales.cancelDirect",
   "sales.discount",
   "sales.discountUnlimited",
+  "sales.credit", // bill with money still to come (udhaar)
+  "sales.edit", // change the items on a saved bill
+  "dues.view",
+  "dues.collect",
+  "advances.manage",
   "payments.markCash",
   "payments.verifyOnline",
   "payments.viewSummary",

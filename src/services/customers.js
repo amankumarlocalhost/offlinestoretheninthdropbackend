@@ -1,4 +1,4 @@
-import { PosCustomer, PosSale, PosReturn, OnlineUser, OnlineOrder } from "../lib/models.js";
+import { PosCustomer, PosSale, PosReturn, PosAdvance, OnlineUser, OnlineOrder } from "../lib/models.js";
 import { hasPermission } from "../lib/permissions.js";
 import { badRequest, conflict, forbidden, notFound } from "../lib/errors.js";
 import { normalizePhone, escapeRegex } from "../lib/validate.js";
@@ -105,10 +105,16 @@ export async function updateCustomer(id, data, actor, permissions, info) {
 export async function customerHistory(id, permissions) {
   const customer = await PosCustomer.findById(id).lean();
   if (!customer) throw notFound("Customer not found.");
-  const [sales, returns] = await Promise.all([
+  const [sales, returns, dueBills, advances] = await Promise.all([
     PosSale.find({ customer: customer._id }).sort({ createdAt: -1 }).limit(100).lean(),
     PosReturn.find({ customer: customer._id }).sort({ createdAt: -1 }).limit(50).lean(),
+    PosSale.find({ customer: customer._id, dueAmount: { $gt: 0 }, status: { $ne: "CANCELLED" } }).select("dueAmount").lean(),
+    PosAdvance.find({ customer: customer._id }).sort({ createdAt: -1 }).limit(30).lean(),
   ]);
+  let dueP = 0;
+  for (const s of dueBills) dueP += Math.round(s.dueAmount * 100);
+  let advanceP = 0;
+  for (const a of advances) if (a.status === "OPEN") advanceP += Math.round(a.paidTotal * 100);
 
   let onlineOrders = [];
   if (customer.onlineUserId) {
@@ -135,7 +141,21 @@ export async function customerHistory(id, permissions) {
       createdAt: s.createdAt,
       grandTotal: s.grandTotal,
       status: s.status,
+      dueAmount: s.dueAmount || 0,
       items: s.items.map((i) => ({ name: i.name, size: i.size, qty: i.qty, returnedQty: i.returnedQty || 0 })),
+    })),
+    // Udhaar still to come from this customer, and advances they have paid.
+    due: Math.round(dueP) / 100,
+    advanceHeld: Math.round(advanceP) / 100,
+    advances: advances.map((a) => ({
+      id: String(a._id),
+      advanceNo: a.advanceNo,
+      createdAt: a.createdAt,
+      paidTotal: a.paidTotal,
+      estimateTotal: a.estimateTotal,
+      status: a.status,
+      billNo: a.billNo,
+      items: (a.items || []).map((i) => ({ name: i.name, size: i.size, qty: i.qty })),
     })),
     returns: returns.map((r) => ({
       id: String(r._id),

@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import { SignJWT, jwtVerify } from "jose";
-import { PosSale, PosProductLink, OnlineProduct, PosCustomer, PosUser } from "../lib/models.js";
+import { PosSale, PosProductLink, OnlineProduct, PosCustomer, PosUser, PosAdvance, PosReturn } from "../lib/models.js";
 import { withTransaction } from "../lib/db.js";
 import { decreaseStock, increaseStock, priceFor } from "../lib/stock.js";
 import { calculateBill, getBillStatus, toPaise, toRupees } from "../lib/money.js";
@@ -14,6 +14,7 @@ import { findLinkBySku } from "./products.js";
 import { rateLimit } from "../lib/http.js";
 import { istDayRange } from "../lib/time.js";
 import { escapeRegex, normalizePhone } from "../lib/validate.js";
+import { releaseAdvanceStock } from "./advances.js";
 
 /* ── Discount approval tokens (admin PIN entered on the spot) ─────────────── */
 function approvalKey() {
@@ -97,6 +98,17 @@ export async function createSale(input, { user, permissions }, info) {
     if (!input.customerId) throw badRequest("Add the customer's mobile number and name first.");
     const customer = await PosCustomer.findById(input.customerId).session(session);
     if (!customer) throw badRequest("Customer not found.");
+
+    // An advance paid earlier: its kept-aside stock goes back first, so the
+    // lines below can take it again, and its money becomes a payment.
+    let advance = null;
+    if (input.advanceId) {
+      if (!hasPermission(permissions, "advances.manage")) throw forbidden("You cannot use advances.");
+      advance = await PosAdvance.findById(input.advanceId).session(session);
+      if (!advance || advance.status !== "OPEN") throw badRequest("This advance is not open any more.");
+      if (String(advance.customer) !== String(customer._id)) throw badRequest("This advance belongs to another customer.");
+      await releaseAdvanceStock(advance, session);
+    }
 
     // Lines: read live product data, then take the stock atomically.
     const lines = [];
@@ -197,7 +209,18 @@ export async function createSale(input, { user, permissions }, info) {
         throw badRequest("Unknown payment mode.");
       }
     }
-    if (paidP !== toPaise(bill.grandTotal)) {
+    if (advance) {
+      paidP += toPaise(advance.paidTotal);
+      payments.push({ mode: "ADVANCE", amount: advance.paidTotal, status: "RECEIVED", ref: advance.advanceNo, receivedAt: new Date() });
+      if (paidP > toPaise(bill.grandTotal)) {
+        throw badRequest(`Advance and payments (₹${toRupees(paidP)}) are more than the bill (₹${bill.grandTotal}). Add items, or cancel the advance with a refund.`);
+      }
+    }
+    // Udhaar: the customer takes the goods and pays the rest later.
+    const dueP = toPaise(bill.grandTotal) - paidP;
+    const onDue = input.allowDue && dueP > 0;
+    if (onDue && !hasPermission(permissions, "sales.credit")) throw forbidden("You cannot give goods on udhaar (pay later).");
+    if (!onDue && paidP !== toPaise(bill.grandTotal)) {
       throw new AppError(
         `Payments (₹${toRupees(paidP)}) must equal the bill total (₹${bill.grandTotal}).`,
         "PAYMENT_MISMATCH",
@@ -224,6 +247,10 @@ export async function createSale(input, { user, permissions }, info) {
       soldBy: user._id,
       soldByName: user.name,
       exchangeAgainst: input.exchangeAgainst || "",
+      dueAmount: onDue ? toRupees(dueP) : 0,
+      dueNote: onDue ? input.dueNote || "" : "",
+      dueDate: onDue && input.dueDate ? istDayRange(input.dueDate).from : null,
+      advanceNo: advance ? advance.advanceNo : "",
       invoice: {
         publicToken: crypto.randomBytes(24).toString("base64url"),
         format: settings.invoice?.defaultFormat || "THERMAL",
@@ -236,6 +263,17 @@ export async function createSale(input, { user, permissions }, info) {
     if (sale.status === "PAID" && customer) sale.statsApplied = true;
     await sale.save({ session });
     if (sale.statsApplied) await applyCustomerStats(sale, 1, session);
+    if (advance) {
+      advance.status = "COMPLETED";
+      advance.sale = sale._id;
+      advance.billNo = sale.billNo;
+      advance.completedAt = new Date();
+      await advance.save({ session });
+      await audit({ user, action: "ADVANCE_COMPLETE", entity: "PosAdvance", entityId: advance.advanceNo, after: { billNo: sale.billNo, amount: advance.paidTotal }, session, ...info });
+    }
+    if (onDue) {
+      await audit({ user, action: "SALE_ON_DUE", entity: "PosSale", entityId: sale.billNo, after: { due: sale.dueAmount, note: sale.dueNote }, session, ...info });
+    }
 
     await audit({ user, action: "SALE_CREATE", entity: "PosSale", entityId: sale.billNo, after: { grandTotal: sale.grandTotal, status: sale.status, items: items.length }, session, ...info });
     if (discount > 0) {
@@ -264,7 +302,12 @@ export function shapeSale(sale, permissions) {
     discountApprovedBy: s.discountApprovedBy,
     roundOff: s.roundOff,
     grandTotal: s.grandTotal,
-    payments: (s.payments || []).map((p) => ({ id: String(p._id), mode: p.mode, amount: p.amount, status: p.status, ref: p.ref, receivedAt: p.receivedAt, verifiedByName: p.verifiedByName })),
+    payments: (s.payments || []).map((p) => ({ id: String(p._id), mode: p.mode, amount: p.amount, status: p.status, ref: p.ref, receivedAt: p.receivedAt, verifiedByName: p.verifiedByName, late: Boolean(p.late), note: p.note || "" })),
+    dueAmount: s.dueAmount || 0,
+    dueNote: s.dueNote || "",
+    dueDate: s.dueDate || null,
+    advanceNo: s.advanceNo || "",
+    edits: s.edits || [],
     status: s.status,
     soldBy: String(s.soldBy),
     soldByName: s.soldByName,
@@ -332,6 +375,7 @@ export async function listSales(query, { user, permissions }) {
     status: s.status,
     soldByName: s.soldByName,
     modes: [...new Set(s.payments.map((p) => p.mode))],
+    dueAmount: s.dueAmount || 0,
   }));
   return { items, total, page, pages: Math.ceil(total / limit) };
 }
@@ -393,6 +437,8 @@ export async function performCancel(saleId, reason, actor, session, info = {}) {
     }
     if (p.mode === "CASH") cashBackP += toPaise(p.amount);
     if (p.mode === "STORE_CREDIT") creditBackP += toPaise(p.amount);
+    // An advance used on the bill goes back to the customer as store credit.
+    if (p.mode === "ADVANCE") creditBackP += toPaise(p.amount);
     p.status = "REVERSED";
   }
   if (creditBackP > 0 && sale.customer) {
@@ -407,6 +453,7 @@ export async function performCancel(saleId, reason, actor, session, info = {}) {
   if (cashBackP > 0) sale.cancelCashRefund = toRupees(cashBackP);
 
   sale.status = "CANCELLED";
+  sale.dueAmount = 0;
   sale.cancelReason = reason;
   sale.cancelledBy = actor.name;
   sale.cancelledAt = new Date();
@@ -480,6 +527,7 @@ export function publicBill(sale) {
     payments: s.payments.filter((p) => p.status !== "REVERSED" || s.status === "CANCELLED").map((p) => ({ mode: p.mode, amount: p.amount, status: p.status, ref: p.ref ? p.ref.slice(-6) : "" })),
     cancelReason: s.status === "CANCELLED" ? s.cancelReason : "",
     exchangeAgainst: s.exchangeAgainst,
+    dueAmount: s.status === "CANCELLED" ? 0 : s.dueAmount || 0,
   };
 }
 
@@ -488,4 +536,285 @@ export async function findByPublicToken(token) {
   const sale = await PosSale.findOne({ "invoice.publicToken": token });
   if (!sale) throw notFound("Bill not found.");
   return sale;
+}
+
+/* ── Udhaar: money still due on a bill ───────────────────────────────────── */
+// Total − every payment that is not reversed (a pending online payment counts as paid).
+export function dueOf(sale) {
+  let paidP = 0;
+  for (const p of sale.payments) if (p.status !== "REVERSED") paidP += toPaise(p.amount);
+  return Math.max(0, toRupees(toPaise(sale.grandTotal) - paidP));
+}
+
+// Payments taken after the bill was made (a due collected, or a bill-edit top-up).
+async function laterPayments(list, sale, { user, permissions, canVerify, session }, note) {
+  const out = [];
+  for (const p of list || []) {
+    if (!(p.amount > 0)) throw badRequest("Each payment amount must be more than zero.");
+    const base = { mode: p.mode, amount: p.amount, late: true, note };
+    if (p.mode === "CASH") {
+      if (!hasPermission(permissions, "payments.markCash")) throw forbidden("You cannot take cash payments.");
+      out.push({ ...base, status: "RECEIVED", receivedAt: new Date(), verifiedByName: user.name });
+    } else if (p.mode === "ONLINE") {
+      const ref = String(p.ref || "").trim();
+      if (ref.length < 4) throw badRequest("Enter the UTR / last 6 digits for the online payment.");
+      if (p.verified && canVerify) out.push({ ...base, ref, status: "RECEIVED", receivedAt: new Date(), verifiedBy: user._id, verifiedByName: user.name });
+      else out.push({ ...base, ref, status: "PENDING" });
+    } else if (p.mode === "STORE_CREDIT") {
+      if (!sale.customer) throw badRequest("Store credit needs a customer.");
+      const res = await PosCustomer.updateOne({ _id: sale.customer, storeCredit: { $gte: p.amount } }, { $inc: { storeCredit: -p.amount } }, { session });
+      if (res.matchedCount === 0) throw badRequest("Not enough store credit.");
+      out.push({ ...base, status: "RECEIVED", receivedAt: new Date(), verifiedByName: user.name });
+    } else {
+      throw badRequest("Unknown payment mode.");
+    }
+  }
+  return out;
+}
+
+// Due amount and status from the payments; customer totals once fully paid.
+async function settleSale(sale, session) {
+  sale.dueAmount = dueOf(sale);
+  sale.status = getBillStatus(sale);
+  if (sale.status === "PAID" && sale.customer && !sale.statsApplied) {
+    sale.statsApplied = true;
+    await applyCustomerStats(sale, 1, session);
+  }
+}
+
+/** The customer pays (part of) what they owe on a bill. */
+export async function collectDue(saleId, input, { user, permissions }, info) {
+  const settings = await getSettings();
+  const canVerify = canVerifyOnline(permissions, settings);
+  return withTransaction(async (session) => {
+    const sale = await PosSale.findById(saleId).session(session);
+    if (!sale) throw notFound("Bill not found.");
+    if (sale.status === "CANCELLED") throw badRequest("This bill is cancelled.");
+    const dueP = toPaise(dueOf(sale));
+    if (dueP <= 0) throw badRequest("Nothing is due on this bill.");
+    let addP = 0;
+    for (const p of input.payments) addP += toPaise(p.amount);
+    if (addP > dueP) throw badRequest(`Only ₹${toRupees(dueP)} is due on this bill.`);
+    const added = await laterPayments(input.payments, sale, { user, permissions, canVerify, session }, input.note || "Due collected");
+    for (const p of added) sale.payments.push(p);
+    await settleSale(sale, session);
+    await sale.save({ session });
+    await audit({ user, action: "DUE_COLLECT", entity: "PosSale", entityId: sale.billNo, after: { amount: toRupees(addP), stillDue: sale.dueAmount }, session, ...info });
+    return sale;
+  });
+}
+
+/** Bills with money still due, newest first, with the customer's details. */
+export async function listDues(query) {
+  const filter = { dueAmount: { $gt: 0 }, status: { $ne: "CANCELLED" } };
+  if (query.customer) filter.customer = query.customer;
+  if (query.q) {
+    const q = String(query.q).trim();
+    const digits = normalizePhone(q);
+    const or = [{ billNo: new RegExp(escapeRegex(q), "i") }, { "customerSnapshot.name": new RegExp(escapeRegex(q), "i") }];
+    if (digits.length >= 4) or.push({ "customerSnapshot.phone": new RegExp(escapeRegex(digits)) });
+    filter.$or = or;
+  }
+  const rows = await PosSale.find(filter).sort({ createdAt: -1 }).limit(500).lean();
+  const ids = [...new Set(rows.filter((s) => s.customer).map((s) => String(s.customer)))];
+  const customers = await PosCustomer.find({ _id: { $in: ids } }).select("name phone email address notes").lean();
+  const byId = new Map(customers.map((c) => [String(c._id), c]));
+
+  let totalP = 0;
+  const people = new Map();
+  const items = rows.map((s) => {
+    totalP += toPaise(s.dueAmount);
+    const c = byId.get(String(s.customer)) || {};
+    const key = String(s.customer);
+    const name = c.name || s.customerSnapshot?.name;
+    const phone = c.phone || s.customerSnapshot?.phone;
+    const row = people.get(key) || { id: key, name, phone, address: c.address || "", bills: 0, due: 0 };
+    row.bills += 1;
+    row.due = toRupees(toPaise(row.due) + toPaise(s.dueAmount));
+    people.set(key, row);
+    let paidP = 0;
+    for (const p of s.payments) if (p.status !== "REVERSED") paidP += toPaise(p.amount);
+    return {
+      id: String(s._id),
+      billNo: s.billNo,
+      createdAt: s.createdAt,
+      customer: { id: key, name, phone, email: c.email || "", address: c.address || "", notes: c.notes || "" },
+      items: s.items.map((i) => ({ name: i.name, sku: i.sku, size: i.size, qty: i.qty, lineTotal: i.lineTotal })),
+      grandTotal: s.grandTotal,
+      paid: toRupees(paidP),
+      dueAmount: s.dueAmount,
+      dueNote: s.dueNote || "",
+      dueDate: s.dueDate || null,
+      status: s.status,
+      soldByName: s.soldByName,
+    };
+  });
+  return {
+    items,
+    customers: [...people.values()].sort((a, b) => b.due - a.due),
+    total: toRupees(totalP),
+  };
+}
+
+/* ── Edit a saved bill's items ────────────────────────────────────────────── */
+/**
+ * Replaces the bill's items with `input.items` in one transaction. Lines that
+ * stay keep the price they were sold at; new lines are priced from the
+ * database. Only the stock difference moves. The bill keeps its number and its
+ * discount rate. If the new total is lower than what was paid, the difference
+ * goes back (cash / online / store credit) as a negative payment row; if it is
+ * higher, the customer pays now and/or the rest becomes udhaar.
+ */
+export async function editSale(saleId, input, { user, permissions }, info) {
+  const settings = await getSettings();
+  const canVerify = canVerifyOnline(permissions, settings);
+
+  const wanted = [];
+  for (const it of input.items) {
+    const sku = String(it.sku).trim().toUpperCase();
+    const found = wanted.find((w) => w.sku === sku);
+    if (found) found.qty += it.qty;
+    else wanted.push({ sku, qty: it.qty });
+  }
+
+  return withTransaction(async (session) => {
+    const sale = await PosSale.findById(saleId).session(session);
+    if (!sale) throw notFound("Bill not found.");
+    assertCanView(sale, { user, permissions });
+    if (sale.status === "CANCELLED") throw badRequest("This bill is cancelled.");
+    for (const it of sale.items) {
+      if (it.returnedQty > 0) throw badRequest("Items on this bill were already returned, so it cannot be edited. Use a return instead.");
+    }
+    if (await PosReturn.exists({ sale: sale._id, status: "PENDING" }).session(session)) throw badRequest("This bill has a return waiting.");
+    for (const p of sale.payments) {
+      if (p.status === "PENDING") throw badRequest("Verify the online payment on this bill before editing it.");
+    }
+
+    const oldTotal = sale.grandTotal;
+    const oldItems = sale.items.map((it) => (it.toObject ? it.toObject() : { ...it }));
+    const oldBySku = new Map(oldItems.map((it) => [it.sku, it]));
+
+    // Customer totals are taken back here and added again below once fully paid.
+    if (sale.statsApplied) {
+      await applyCustomerStats(sale, -1, session);
+      sale.statsApplied = false;
+    }
+
+    const lines = [];
+    const changes = [];
+    const kept = new Set();
+    for (const w of wanted) {
+      let old = oldBySku.get(w.sku);
+      let link = null;
+      if (!old) {
+        link = await findLinkBySku(w.sku, session);
+        if (!link) throw notFound(`No product with SKU ${w.sku}.`);
+        old = oldBySku.get(link.sku);
+      }
+      if (old) {
+        if (kept.has(old.sku)) throw badRequest(`${old.sku} is listed twice.`);
+        kept.add(old.sku);
+        const delta = w.qty - old.qty;
+        if (delta !== 0) {
+          const l = await findLinkBySku(old.sku, session);
+          const variantKey = l ? l.variantKey : old.size;
+          if (delta > 0) await decreaseStock({ productId: old.productId, variantKey, qty: delta, sku: old.sku, session });
+          else await increaseStock({ productId: old.productId, variantKey, qty: -delta, session });
+          changes.push({ sku: old.sku, name: old.name, size: old.size, fromQty: old.qty, toQty: w.qty });
+        }
+        lines.push({ productId: old.productId, sku: old.sku, name: old.name, size: old.size, color: old.color, image: old.image, qty: w.qty, mrp: old.mrp, price: old.price, cost: old.cost ?? null, isSaleItem: old.isSaleItem });
+        continue;
+      }
+      // A new item on the bill: priced and stocked like a new sale.
+      if (kept.has(link.sku)) throw badRequest(`${link.sku} is listed twice.`);
+      if (!link.isActive) throw new AppError(`${link.sku} is not available for billing.`, "SKU_INACTIVE", 409);
+      const product = await OnlineProduct.findById(link.productId).session(session).lean();
+      if (!product || product.isActive === false) throw new AppError(`${link.sku} is no longer available.`, "PRODUCT_INACTIVE", 409);
+      await decreaseStock({ productId: link.productId, variantKey: link.variantKey, qty: w.qty, sku: link.sku, session });
+      const { price, mrp } = priceFor(product, link.variantKey);
+      let isSaleItem = product.badge === "Sale";
+      for (const c of product.categories || []) if (c === "sale") isSaleItem = true;
+      lines.push({ productId: product._id, sku: link.sku, name: product.name, size: link.size, color: link.color, image: product.images?.[0] || null, qty: w.qty, mrp, price, cost: link.costPrice ?? null, isSaleItem });
+      kept.add(link.sku);
+      changes.push({ sku: link.sku, name: product.name, size: link.size, fromQty: 0, toQty: w.qty });
+    }
+    // Lines taken off the bill: their stock goes back.
+    for (const old of oldItems) {
+      if (kept.has(old.sku)) continue;
+      const l = await findLinkBySku(old.sku, session);
+      await increaseStock({ productId: old.productId, variantKey: l ? l.variantKey : old.size, qty: old.qty, session });
+      changes.push({ sku: old.sku, name: old.name, size: old.size, fromQty: old.qty, toQty: 0 });
+    }
+    if (!changes.length) throw badRequest("Nothing changed on the bill.");
+
+    // Same discount rate as before, on the new subtotal.
+    let subP = 0;
+    let mrpP = 0;
+    for (const l of lines) {
+      subP += toPaise(l.price) * l.qty;
+      mrpP += toPaise(l.mrp) * l.qty;
+    }
+    const oldSubP = toPaise(sale.subTotal);
+    const discountP = oldSubP > 0 ? Math.min(subP, Math.round((subP * toPaise(sale.discount)) / oldSubP)) : 0;
+    const bill = calculateBill(lines, toRupees(discountP));
+    const items = [];
+    for (let i = 0; i < lines.length; i++) items.push({ ...lines[i], ...bill.lines[i], returnedQty: 0 });
+
+    let paidP = 0;
+    for (const p of sale.payments) if (p.status !== "REVERSED") paidP += toPaise(p.amount);
+    const oldDueP = Math.max(0, toPaise(oldTotal) - paidP);
+    const newTotalP = toPaise(bill.grandTotal);
+
+    sale.items = items;
+    sale.markModified("items");
+    sale.mrpTotal = toRupees(mrpP);
+    sale.subTotal = bill.subTotal;
+    sale.discount = bill.discount;
+    sale.discountPercent = subP > 0 ? Math.round((toPaise(bill.discount) / subP) * 10000) / 100 : 0;
+    sale.roundOff = bill.roundOff;
+    sale.grandTotal = bill.grandTotal;
+
+    let refund = null;
+    if (paidP > newTotalP) {
+      // Paid more than the new total: give the difference back.
+      if ((input.payments || []).length) throw badRequest("The new total is less than what was paid, so no payment is needed.");
+      const backP = paidP - newTotalP;
+      const mode = input.refundMode;
+      if (!mode) throw new AppError(`The customer gets ₹${toRupees(backP)} back. Choose cash, online or store credit.`, "REFUND_MODE", 400);
+      if (mode === "CASH" && !hasPermission(permissions, "payments.markCash")) throw forbidden("You cannot give cash back.");
+      if (mode === "STORE_CREDIT") {
+        if (!sale.customer) throw badRequest("Store credit needs a customer.");
+        await PosCustomer.updateOne({ _id: sale.customer }, { $inc: { storeCredit: toRupees(backP) } }, { session });
+      }
+      sale.payments.push({ mode, amount: -toRupees(backP), status: "RECEIVED", late: true, note: "Refund on bill edit", receivedAt: new Date(), verifiedBy: user._id, verifiedByName: user.name });
+      refund = { mode, amount: toRupees(backP) };
+    } else {
+      let addP = 0;
+      for (const p of input.payments || []) addP += toPaise(p.amount);
+      const shortP = newTotalP - paidP;
+      if (addP > shortP) throw badRequest(`Only ₹${toRupees(shortP)} more is to be paid.`);
+      const newDueP = shortP - addP;
+      if (newDueP > oldDueP) {
+        if (!input.allowDue) throw new AppError(`₹${toRupees(newDueP - oldDueP)} more is to be paid. Add a payment, or keep it as udhaar.`, "PAYMENT_SHORT", 400);
+        if (!hasPermission(permissions, "sales.credit")) throw forbidden("You cannot give goods on udhaar (pay later).");
+      }
+      const added = await laterPayments(input.payments, sale, { user, permissions, canVerify, session }, "Paid on bill edit");
+      for (const p of added) sale.payments.push(p);
+    }
+
+    sale.edits.push({ at: new Date(), by: user._id, byName: user.name, reason: input.reason, oldTotal, newTotal: sale.grandTotal, changes });
+    await settleSale(sale, session);
+    await sale.save({ session });
+    await audit({
+      user,
+      action: "SALE_EDIT",
+      entity: "PosSale",
+      entityId: sale.billNo,
+      before: { grandTotal: oldTotal, items: oldItems.map((i) => `${i.sku} ×${i.qty}`) },
+      after: { grandTotal: sale.grandTotal, reason: input.reason, changes, refund, due: sale.dueAmount },
+      session,
+      ...info,
+    });
+    return sale;
+  });
 }

@@ -24,6 +24,12 @@ export async function nextReturnNo(session) {
   return `TND-RT-${ym}-${String(seq).padStart(4, "0")}`;
 }
 
+export async function nextAdvanceNo(session) {
+  const ym = yymm();
+  const seq = await next(`advance:${ym}`, session);
+  return `TND-AD-${ym}-${String(seq).padStart(4, "0")}`;
+}
+
 export async function nextProductNo() {
   return next("sku-product-no", null);
 }

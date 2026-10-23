@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { route, json, readJson, clientInfo, query } from "../lib/http.js";
-import { saleSchema, reasonSchema, verifySchema, pinSchema } from "../lib/schemas.js";
-import { createSale, listSales, getSale, shapeSale, publicBillUrl, cancelSale, verifyPayment, recordPrint, whatsappLink, verifyAdminPin } from "../services/sales.js";
+import { saleSchema, reasonSchema, verifySchema, pinSchema, collectDueSchema, saleEditSchema } from "../lib/schemas.js";
+import { createSale, listSales, getSale, shapeSale, publicBillUrl, cancelSale, verifyPayment, recordPrint, whatsappLink, verifyAdminPin, collectDue, editSale } from "../services/sales.js";
 import { audit } from "../lib/audit.js";
 import { getSettings } from "../lib/settings.js";
 
@@ -73,6 +73,32 @@ router.patch(
       return json({ sale: shapeSale(sale, session.permissions) });
     },
     { permission: ["payments.verifyOnline", "sales.viewAll"] }
+  )
+);
+
+// Udhaar: the customer pays (part of) what is still due on the bill.
+router.post(
+  "/:id/collect",
+  route(
+    async (req, { params, session }) => {
+      const body = collectDueSchema.parse(readJson(req));
+      const sale = await collectDue(params.id, body, session, clientInfo(req));
+      return json({ sale: shapeSale(sale, session.permissions) });
+    },
+    { permission: "dues.collect" }
+  )
+);
+
+// Change the items on a saved bill (e.g. the customer drops the shirt, keeps the jeans).
+router.put(
+  "/:id/items",
+  route(
+    async (req, { params, session }) => {
+      const body = saleEditSchema.parse(readJson(req));
+      const sale = await editSale(params.id, body, session, clientInfo(req));
+      return json({ sale: { ...shapeSale(sale, session.permissions), publicUrl: publicBillUrl(sale) } });
+    },
+    { permission: "sales.edit" }
   )
 );
 

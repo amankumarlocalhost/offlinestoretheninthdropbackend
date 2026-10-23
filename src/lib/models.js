@@ -239,9 +239,14 @@ const saleItemSchema = new Schema(
   { _id: false }
 );
 
+// ADVANCE = money the customer paid earlier as an advance (pos_advances), used on this bill.
+// late = taken after the bill was made (a due collected, or a bill-edit top-up / refund).
+// A refund on a bill edit is a RECEIVED row with a negative amount.
 const paymentSchema = new Schema({
-  mode: { type: String, enum: ["CASH", "ONLINE", "STORE_CREDIT"], required: true },
+  mode: { type: String, enum: ["CASH", "ONLINE", "STORE_CREDIT", "ADVANCE"], required: true },
   amount: { type: Number, required: true },
+  late: { type: Boolean, default: false },
+  note: { type: String, default: "" },
   status: { type: String, enum: ["RECEIVED", "PENDING", "REVERSED"], default: "PENDING" },
   ref: { type: String, default: "" }, // UTR / last digits for online
   receivedAt: { type: Date, default: null },
@@ -293,6 +298,29 @@ const saleSchema = new Schema(
     cancelledAt: { type: Date, default: null },
     // Cash handed back when the bill was cancelled.
     cancelCashRefund: { type: Number, default: 0 },
+    // Udhaar: what the customer still owes on this bill (total − payments not reversed).
+    dueAmount: { type: Number, default: 0 },
+    dueNote: { type: String, default: "" },
+    dueDate: { type: Date, default: null }, // when the customer promised to pay
+    advanceNo: { type: String, default: "" }, // advance used on this bill
+    // Every change made to the bill's items after it was saved.
+    edits: {
+      type: [
+        new Schema(
+          {
+            at: { type: Date, default: Date.now },
+            by: ObjectId,
+            byName: String,
+            reason: String,
+            oldTotal: Number,
+            newTotal: Number,
+            changes: [{ _id: false, sku: String, name: String, size: String, fromQty: Number, toQty: Number }],
+          },
+          { _id: false }
+        ),
+      ],
+      default: [],
+    },
   },
   { timestamps: true }
 );
@@ -301,6 +329,8 @@ saleSchema.index({ "invoice.publicToken": 1 }, { unique: true });
 saleSchema.index({ createdAt: -1 });
 saleSchema.index({ soldBy: 1, createdAt: -1 });
 saleSchema.index({ customer: 1, createdAt: -1 });
+saleSchema.index({ dueAmount: 1 });
+saleSchema.index({ "payments.receivedAt": 1 });
 export const PosSale = model("PosSale", saleSchema, "pos_sales");
 
 const returnSchema = new Schema(
@@ -338,6 +368,67 @@ returnSchema.index({ sale: 1 });
 returnSchema.index({ processedAt: -1 });
 returnSchema.index({ returnNo: 1 }, { unique: true, sparse: true });
 export const PosReturn = model("PosReturn", returnSchema, "pos_returns");
+
+// Advance / booking: the customer paid money now and the shop keeps the
+// products aside (their stock is taken off so nobody else sells them). The
+// customer pays the rest later and takes the goods: the advance becomes a bill.
+const advanceItemSchema = new Schema(
+  {
+    productId: ObjectId,
+    sku: String,
+    variantKey: { type: String, default: null },
+    name: String,
+    size: String,
+    color: String,
+    image: String,
+    qty: Number,
+    price: Number, // per unit at booking time (the bill uses the price on the day it is made)
+    mrp: Number,
+  },
+  { _id: false }
+);
+const advancePaymentSchema = new Schema(
+  {
+    mode: { type: String, enum: ["CASH", "ONLINE"], required: true },
+    amount: { type: Number, required: true },
+    ref: { type: String, default: "" },
+    receivedAt: { type: Date, default: Date.now },
+    byName: { type: String, default: "" },
+  },
+  { _id: false }
+);
+export const ADVANCE_STATUSES = ["OPEN", "COMPLETED", "CANCELLED"];
+const advanceSchema = new Schema(
+  {
+    advanceNo: { type: String, required: true },
+    customer: { type: ObjectId, ref: "PosCustomer", required: true },
+    customerSnapshot: { name: String, phone: String },
+    items: { type: [advanceItemSchema], default: [] },
+    estimateTotal: { type: Number, default: 0 },
+    payments: { type: [advancePaymentSchema], default: [] },
+    paidTotal: { type: Number, default: 0 },
+    note: { type: String, default: "" },
+    pickupBy: { type: Date, default: null }, // when the customer said they will come
+    status: { type: String, enum: ADVANCE_STATUSES, default: "OPEN" },
+    sale: { type: ObjectId, default: null }, // the bill it became
+    billNo: { type: String, default: "" },
+    completedAt: { type: Date, default: null },
+    cancelReason: { type: String, default: "" },
+    cancelledAt: { type: Date, default: null },
+    cancelledBy: { type: String, default: "" },
+    // Money given back when cancelled (CASH / ONLINE from the shop, STORE_CREDIT on the customer).
+    refund: { mode: { type: String, default: "" }, amount: { type: Number, default: 0 } },
+    createdBy: ObjectId,
+    createdByName: String,
+  },
+  { timestamps: true }
+);
+advanceSchema.index({ advanceNo: 1 }, { unique: true });
+advanceSchema.index({ status: 1, createdAt: -1 });
+advanceSchema.index({ customer: 1, createdAt: -1 });
+advanceSchema.index({ "payments.receivedAt": 1 });
+advanceSchema.index({ cancelledAt: 1 });
+export const PosAdvance = model("PosAdvance", advanceSchema, "pos_advances");
 
 export const EXPENSE_CATEGORIES = ["TEA_SNACKS", "CLEANING", "TRANSPORT", "MISC"];
 const expenseSchema = new Schema(

@@ -1,9 +1,9 @@
 // Owner-side read screens and shop expenses: dashboard, reports, audit logs, expenses.
 import { Router } from "express";
 import { route, json, readJson, clientInfo, query } from "../lib/http.js";
-import { expenseSchema } from "../lib/schemas.js";
+import { expenseSchema, expenseUpdateSchema } from "../lib/schemas.js";
 import { dashboard, dailyReport, monthlyReport, stockReport } from "../services/reports.js";
-import { createExpense, listExpenses } from "../services/expenses.js";
+import { createExpense, listExpenses, updateExpense, deleteExpense } from "../services/expenses.js";
 import { PosAuditLog } from "../lib/models.js";
 import { istDayRange } from "../lib/time.js";
 import { badRequest } from "../lib/errors.js";
@@ -57,6 +57,24 @@ router.post(
     },
     { permission: "expenses.create" }
   )
+);
+
+// Fix a wrong expense (including its date). The service checks who may change which entry.
+router.patch(
+  "/expenses/:id",
+  route(
+    async (req, { params, session }) => {
+      const body = expenseUpdateSchema.parse(readJson(req));
+      const e = await updateExpense(params.id, body, session, clientInfo(req));
+      return json({ expense: { id: String(e._id), status: e.status, amount: e.amount, title: e.title, date: e.date } });
+    },
+    { permission: ["expenses.create", "expenses.viewAll"] }
+  )
+);
+
+router.delete(
+  "/expenses/:id",
+  route(async (req, { params, session }) => json(await deleteExpense(params.id, session, clientInfo(req))), { permission: ["expenses.create", "expenses.viewAll"] })
 );
 
 // Read only. There is no update or delete endpoint for audit logs.

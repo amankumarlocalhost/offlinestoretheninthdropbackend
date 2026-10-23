@@ -10,6 +10,8 @@ import catalogAdminRoutes from "./routes/catalogAdmin.routes.js";
 import customersRoutes from "./routes/customers.routes.js";
 import salesRoutes from "./routes/sales.routes.js";
 import returnsRoutes from "./routes/returns.routes.js";
+import duesRoutes from "./routes/dues.routes.js";
+import advancesRoutes from "./routes/advances.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
 import publicRoutes from "./routes/public.routes.js";
 import { connectDB } from "./lib/db.js";
@@ -55,6 +57,8 @@ export function createApp() {
   api.use("/customers", customersRoutes);
   api.use("/sales", salesRoutes);
   api.use("/returns", returnsRoutes);
+  api.use("/dues", duesRoutes);
+  api.use("/advances", advancesRoutes);
   api.use("/", adminRoutes);
   app.use("/api", api);
 

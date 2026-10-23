@@ -1,4 +1,4 @@
-import { PosSale, PosReturn, PosExpense, OnlineProduct, OnlineOrder, OnlineCategory, PosProductLink } from "../lib/models.js";
+import { PosSale, PosReturn, PosExpense, OnlineProduct, OnlineOrder, OnlineCategory, PosProductLink, PosAdvance } from "../lib/models.js";
 import { availableQty, priceFor, keyOf } from "../lib/stock.js";
 import { hasPermission } from "../lib/permissions.js";
 import { istDayRange, istMonthRange, istDateKey, istHour } from "../lib/time.js";
@@ -16,16 +16,25 @@ function summarize(sales) {
   let creditP = 0;
   let pendingP = 0;
   let discountP = 0;
+  let advanceP = 0;
+  let dueP = 0;
   let items = 0;
   let splitBills = 0;
   for (const s of sales) {
     totalP += toPaise(s.grandTotal);
     discountP += toPaise(s.discount);
+    dueP += toPaise(s.dueAmount || 0);
     for (const it of s.items) items += it.qty;
     const modes = new Set();
     for (const p of s.payments) {
       modes.add(p.mode);
+      // Taken after the bill (a due, or a bill edit): counted on its own day in moneyMoved().
+      if (p.late) continue;
       if (p.status === "PENDING") pendingP += toPaise(p.amount);
+      if (p.mode === "ADVANCE") {
+        if (p.status === "RECEIVED") advanceP += toPaise(p.amount);
+        continue;
+      }
       if (p.status !== "RECEIVED") continue;
       if (p.mode === "CASH") cashP += toPaise(p.amount);
       else if (p.mode === "ONLINE") onlineP += toPaise(p.amount);
@@ -43,7 +52,77 @@ function summarize(sales) {
     pendingAmount: toRupees(pendingP),
     discounts: toRupees(discountP),
     splitBills,
+    advanceUsed: toRupees(advanceP), // paid earlier as an advance
+    due: toRupees(dueP), // udhaar still to come on these bills
   };
+}
+
+/**
+ * Money that moved in a period outside the bill's own moment: dues collected
+ * (and bill-edit top-ups), refunds given on a bill edit (negative rows), and
+ * advances taken / given back. Each counts on the day it happened.
+ */
+async function moneyMoved(range) {
+  const inRange = (d) => d && d >= range.from && d < range.to;
+  const [sales, advances, cancelledAdv] = await Promise.all([
+    PosSale.find({ payments: { $elemMatch: { late: true, receivedAt: { $gte: range.from, $lt: range.to } } } })
+      .select("billNo customerSnapshot payments")
+      .lean(),
+    PosAdvance.find({ "payments.receivedAt": { $gte: range.from, $lt: range.to } }).select("advanceNo customerSnapshot payments").lean(),
+    PosAdvance.find({ status: "CANCELLED", cancelledAt: { $gte: range.from, $lt: range.to } }).select("advanceNo customerSnapshot refund").lean(),
+  ]);
+  const out = { inP: { CASH: 0, ONLINE: 0, STORE_CREDIT: 0 }, outP: { CASH: 0, ONLINE: 0, STORE_CREDIT: 0 }, advInP: { CASH: 0, ONLINE: 0 }, advOutP: { CASH: 0, ONLINE: 0, STORE_CREDIT: 0 } };
+  const rows = [];
+  for (const s of sales) {
+    for (const p of s.payments) {
+      // A reversed row (bill cancelled later) still moved money that day; the cancel gives it back.
+      if (!p.late || !inRange(p.receivedAt) || p.status === "PENDING") continue;
+      const a = toPaise(p.amount);
+      if (a >= 0) out.inP[p.mode] = (out.inP[p.mode] || 0) + a;
+      else out.outP[p.mode] = (out.outP[p.mode] || 0) - a;
+      rows.push({ kind: a >= 0 ? "DUE_IN" : "EDIT_REFUND", ref: s.billNo, customer: s.customerSnapshot?.name, mode: p.mode, amount: p.amount, at: p.receivedAt, note: p.note || "" });
+    }
+  }
+  for (const a of advances) {
+    for (const p of a.payments) {
+      if (!inRange(p.receivedAt)) continue;
+      out.advInP[p.mode] = (out.advInP[p.mode] || 0) + toPaise(p.amount);
+      rows.push({ kind: "ADVANCE_IN", ref: a.advanceNo, customer: a.customerSnapshot?.name, mode: p.mode, amount: p.amount, at: p.receivedAt, note: "" });
+    }
+  }
+  for (const a of cancelledAdv) {
+    const m = a.refund?.mode;
+    if (!m || m === "NONE" || !(a.refund.amount > 0)) continue;
+    out.advOutP[m] = (out.advOutP[m] || 0) + toPaise(a.refund.amount);
+    rows.push({ kind: "ADVANCE_REFUND", ref: a.advanceNo, customer: a.customerSnapshot?.name, mode: m, amount: -a.refund.amount, at: null, note: "" });
+  }
+  const r = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, toRupees(v)]));
+  return {
+    dueCollected: r(out.inP),
+    editRefunds: r(out.outP),
+    advancesTaken: r(out.advInP),
+    advancesRefunded: r(out.advOutP),
+    cashIn: toRupees(out.inP.CASH + out.advInP.CASH),
+    cashOut: toRupees(out.outP.CASH + out.advOutP.CASH),
+    rows: rows.sort((x, y) => new Date(x.at || 0) - new Date(y.at || 0)),
+  };
+}
+
+// Udhaar outstanding right now and money held as open advances.
+async function openBalances() {
+  const [dues, advances] = await Promise.all([
+    PosSale.find({ dueAmount: { $gt: 0 }, status: { $ne: "CANCELLED" } }).select("dueAmount customer").lean(),
+    PosAdvance.find({ status: "OPEN" }).select("paidTotal").lean(),
+  ]);
+  let dueP = 0;
+  const people = new Set();
+  for (const s of dues) {
+    dueP += toPaise(s.dueAmount);
+    people.add(String(s.customer));
+  }
+  let advP = 0;
+  for (const a of advances) advP += toPaise(a.paidTotal);
+  return { dues: { outstanding: toRupees(dueP), bills: dues.length, customers: people.size }, advances: { held: toRupees(advP), open: advances.length } };
 }
 
 function sumReturns(returns) {
@@ -162,7 +241,7 @@ function profitOf(sales, fallbackCost) {
   };
 }
 
-const saleFields = "billNo createdAt customer customerSnapshot items payments grandTotal discount status soldByName";
+const saleFields = "billNo createdAt customer customerSnapshot items payments grandTotal discount status soldByName dueAmount";
 
 export async function dashboard(year, month, permissions) {
   const range = istMonthRange(year, month);
@@ -185,6 +264,7 @@ export async function dashboard(year, month, permissions) {
   const month_ = summarize(sales);
   const ret = sumReturns(returns);
   const exp = sumExpenses(expenses);
+  const [balances, moved] = await Promise.all([openBalances(), moneyMoved(range)]);
 
   const days = [];
   const byDay = new Map();
@@ -235,6 +315,8 @@ export async function dashboard(year, month, permissions) {
     },
     online: { orders: onlineOrders.length, total: toRupees(onlineP) },
     profit,
+    ...balances,
+    collections: { dueCollected: moved.dueCollected, advancesTaken: moved.advancesTaken },
   };
 }
 
@@ -250,6 +332,7 @@ export async function dailyReport(dateStr) {
   const summary = summarize(sales);
   const ret = sumReturns(returns);
   const exp = sumExpenses(expenses.filter((e) => e.status === "APPROVED"));
+  const moved = await moneyMoved(day);
 
   const hourly = [];
   for (let h = 0; h < 24; h++) hourly.push({ hour: `${String(h).padStart(2, "0")}:00`, total: 0, bills: 0 });
@@ -269,11 +352,16 @@ export async function dailyReport(dateStr) {
   // Cash taken and given back during the day (no opening balance is tracked).
   let cancelCashP = 0;
   for (const c of cancelled) cancelCashP += toPaise(c.cancelCashRefund || 0);
+  // Dues collected and advances taken add to the drawer; bill-edit and advance refunds leave it.
+  const movedInP = toPaise(moved.cashIn);
+  const movedOutP = toPaise(moved.cashOut);
   const cash = {
-    cashIn: summary.cash,
-    cashReturned: toRupees(toPaise(ret.cash) + cancelCashP),
+    cashIn: toRupees(toPaise(summary.cash) + movedInP),
+    cashReturned: toRupees(toPaise(ret.cash) + cancelCashP + movedOutP),
     cashExpenses: exp.cash,
-    netCash: toRupees(toPaise(summary.cash) - toPaise(ret.cash) - cancelCashP - toPaise(exp.cash)),
+    netCash: toRupees(toPaise(summary.cash) + movedInP - toPaise(ret.cash) - cancelCashP - movedOutP - toPaise(exp.cash)),
+    fromDues: moved.dueCollected.CASH || 0,
+    fromAdvances: moved.advancesTaken.CASH || 0,
   };
 
   return {
@@ -304,6 +392,7 @@ export async function dailyReport(dateStr) {
     expenses: expenses.map((e) => ({ title: e.title, category: e.category, amount: e.amount, paidVia: e.paidVia, status: e.status, by: e.addedByName })),
     cash,
     staff: staffWise(sales),
+    moneyMoved: moved,
   };
 }
 

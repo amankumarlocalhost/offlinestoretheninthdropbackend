@@ -4,6 +4,14 @@ import { ALL_PERMISSIONS } from "./permissions.js";
 import { EXPENSE_CATEGORIES } from "./models.js";
 
 const perm = z.enum(ALL_PERMISSIONS);
+// "YYYY-MM-DD" (an IST calendar date) or empty → null.
+const dateOnly = z
+  .string()
+  .trim()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Use a date like 2026-10-19")
+  .or(z.literal(""))
+  .nullable()
+  .transform((v) => v || null);
 const password = z.string().min(8, "Password must be at least 8 characters").max(100);
 const username = z
   .string()
@@ -57,7 +65,8 @@ export const customerSchema = z.object({
 });
 export const customerUpdateSchema = customerSchema.partial();
 
-export const saleSchema = z.object({
+export const saleSchema = z
+  .object({
   // Every bill needs a customer (mobile + name). Walk-in bills are not allowed.
   customerId: objectId.nullable().optional().refine((v) => Boolean(v), "Add the customer's mobile number and name first."),
   items: z
@@ -82,10 +91,19 @@ export const saleSchema = z.object({
         verified: z.boolean().optional().default(false),
       })
     )
-    .min(1, "Add a payment")
-    .max(5),
+    .max(5)
+    .optional()
+    .default([]),
   exchangeAgainst: z.string().trim().max(30).optional().default(""),
-});
+  // Udhaar: the customer takes the goods now and pays the rest later.
+  allowDue: z.boolean().optional().default(false),
+  dueNote: z.string().trim().max(300).optional().default(""),
+  dueDate: dateOnly.optional(),
+  // An open advance whose money (and kept-aside stock) goes into this bill.
+  advanceId: objectId.nullable().optional(),
+})
+  // A bill always needs a payment unless the rest is udhaar or an advance pays for it.
+  .refine((v) => v.payments.length > 0 || v.allowDue || v.advanceId, { message: "Add a payment", path: ["payments"] });
 
 export const reasonSchema = z.object({ reason: z.string().trim().min(1, "A reason is required").max(300) });
 export const verifySchema = z.object({ ref: z.string().trim().max(40).optional() });
@@ -106,6 +124,58 @@ export const expenseSchema = z.object({
   paidVia: z.enum(["CASH", "ONLINE"]),
   date: z.coerce.date().optional(),
   note: z.string().trim().max(300).optional(),
+});
+
+export const expenseUpdateSchema = expenseSchema.partial();
+
+/* ── Udhaar, bill edits and advances ─────────────────────────────────────── */
+const laterPayment = z.object({
+  mode: z.enum(["CASH", "ONLINE", "STORE_CREDIT"]),
+  amount: money,
+  ref: z.string().trim().max(40).optional().default(""),
+  verified: z.boolean().optional().default(false),
+});
+
+// Money taken later against a bill's due amount.
+export const collectDueSchema = z.object({
+  payments: z.array(laterPayment).min(1, "Add a payment").max(5),
+  note: z.string().trim().max(300).optional().default(""),
+});
+
+// The bill's full new item list. Lines already on the bill keep their price.
+export const saleEditSchema = z.object({
+  items: z
+    .array(z.object({ sku: z.string().trim().min(1).max(40), qty: z.coerce.number().int().min(1).max(100) }))
+    .min(1, "A bill needs at least one item. To remove everything, cancel the bill.")
+    .max(200),
+  reason: z.string().trim().min(1, "A reason is required").max(300),
+  // When the new total is lower than what was paid: how the difference goes back.
+  refundMode: z.enum(["CASH", "ONLINE", "STORE_CREDIT"]).optional().nullable(),
+  // When it is higher: money taken now, and/or keep the rest as udhaar.
+  payments: z.array(laterPayment).max(5).optional().default([]),
+  allowDue: z.boolean().optional().default(false),
+});
+
+const advancePayment = z.object({
+  mode: z.enum(["CASH", "ONLINE"]),
+  amount: money.refine((v) => v > 0, "Amount must be more than zero"),
+  ref: z.string().trim().max(40).optional().default(""),
+});
+export const advanceSchema = z.object({
+  customerId: objectId,
+  items: z
+    .array(z.object({ sku: z.string().trim().min(1).max(40), qty: z.coerce.number().int().min(1).max(100) }))
+    .max(100)
+    .optional()
+    .default([]),
+  payments: z.array(advancePayment).min(1, "Add the advance amount").max(3),
+  note: z.string().trim().max(500).optional().default(""),
+  pickupBy: dateOnly.optional(),
+});
+export const advancePaymentSchema = z.object({ payments: z.array(advancePayment).min(1).max(3) });
+export const advanceCancelSchema = z.object({
+  reason: z.string().trim().min(1, "A reason is required").max(300),
+  refundMode: z.enum(["CASH", "ONLINE", "STORE_CREDIT", "NONE"]),
 });
 
 export const pinSchema = z.object({
